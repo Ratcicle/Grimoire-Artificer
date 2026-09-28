@@ -1,0 +1,49 @@
+{
+  "collections": [
+    {
+      "name": "visualDNA",
+      "description": "Stores user's saved artstyle reference images and extracted metadata",
+      "fields": {
+        "userId": { "type": "string", "description": "The ID of the user who owns the memory" },
+        "name": { "type": "string", "description": "Name of the reference" },
+        "imageUrl": { "type": "string", "description": "Base64 encoded image data (compressed)" },
+        "summary": { "type": "string" },
+        "linework": { "type": "string" },
+        "rendering": { "type": "string" },
+        "palette": { "type": "string" },
+        "silhouette": { "type": "string" },
+        "pose": { "type": "string" },
+        "framing": { "type": "string" },
+        "composition": { "type": "string" },
+        "lighting": { "type": "string" },
+        "effects": { "type": "string" },
+        "materials": { "type": "string" },
+        "details": { "type": "string" },
+        "background": { "type": "string" },
+        "hierarchy": { "type": "string" },
+        "positivePrompt": { "type": "string" },
+        "negativePrompt": { "type": "string" },
+        "tags": { "type": "array", "items": { "type": "string" } },
+        "scores": { "type": "map" }
+      },
+      "rules": [
+        {
+          "condition": "request.auth != null && request.auth.uid == resource.data.userId",
+          "allow": ["read", "update", "delete"],
+          "description": "Users can only read, update, or delete their own data"
+        },
+        {
+          "condition": "request.auth != null && request.auth.uid == request.resource.data.userId",
+          "allow": ["create"],
+          "description": "Users can only create data for themselves"
+        }
+      ],
+      "indexes": [
+        {
+          "fields": ["userId"],
+          "queryTypes": ["where"]
+        }
+      ]
+    }
+  ]
+}

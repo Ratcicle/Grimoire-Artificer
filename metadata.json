@@ -1,0 +1,6 @@
+{
+  "name": "Grimoire Artificer",
+  "description": "A fantasy TCG card art generator powered by Gemini 3 Pro. Craft unique illustrations for Monster, Spell, and Trap cards.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
