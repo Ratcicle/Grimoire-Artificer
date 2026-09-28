@@ -300,18 +300,24 @@ const App: React.FC = () => {
                               </button>
 
                               {/* DNA retrieved panel */}
-                              {currentCard.usedReferences && currentCard.usedReferences.length > 0 && (
+                              {((currentCard.usedReferences && currentCard.usedReferences.length > 0) || currentCard.synthDebug) && (
                                 <div className="mt-4 p-4 bg-stone-900/30 rounded-xl border border-stone-800 w-full max-w-sm text-left">
                                   <p className="text-[10px] font-bold text-amber-500 uppercase tracking-widest mb-2 flex items-center gap-1.5">
                                     <Database size={11} />
                                     Injected Visual DNA
                                   </p>
                                   <div className="flex flex-wrap gap-1 mb-3">
-                                    {currentCard.usedReferences.map((ref) => (
-                                      <span key={ref.id} className="text-[9px] bg-stone-950 text-stone-400 px-2 py-0.5 rounded border border-stone-800">
-                                        {ref.name}
+                                    {currentCard.usedReferences && currentCard.usedReferences.length > 0 ? (
+                                      currentCard.usedReferences.map((ref) => (
+                                        <span key={ref.id} className="text-[9px] bg-stone-950 text-amber-400 px-2 py-0.5 rounded border border-amber-900/40">
+                                          {ref.name} <span className="text-[7px] text-stone-500 uppercase font-mono">(Contributed)</span>
+                                        </span>
+                                      ))
+                                    ) : (
+                                      <span className="text-[9px] bg-stone-950/80 text-stone-500 italic px-2 py-0.5 rounded border border-stone-800">
+                                        No database fragments contributed (all safely filtered)
                                       </span>
-                                    ))}
+                                    )}
                                   </div>
                                   {currentCard.injectedPromptBlock && (
                                     <details className="group">
@@ -327,7 +333,22 @@ const App: React.FC = () => {
     <div className="font-mono text-amber-500/95 font-bold uppercase tracking-wider border-b border-stone-900 pb-1.5">
       Synthesis Logic
     </div>
-    <div className="space-y-1.5 max-h-36 overflow-y-auto scrollbar-thin pr-1 font-mono text-[9px]">
+    <div className="space-y-1.5 max-h-48 overflow-y-auto scrollbar-thin pr-1 font-mono text-[9px]">
+      {currentCard.synthDebug.allContributionsDiscarded && (
+        <div className="text-amber-400/90 font-bold mb-1.5">
+          [All candidate fragments were safely discarded as incompatible]
+        </div>
+      )}
+      {currentCard.synthDebug.evaluations && currentCard.synthDebug.evaluations.length > 0 && (
+        <div className="mb-2">
+          <span className="text-stone-500 font-bold block mb-1">Evaluated Contributions</span>
+          {currentCard.synthDebug.evaluations.map((ev, i) => (
+            <div key={i} className={ev.decision === 'included' ? 'text-green-400' : 'text-stone-600 line-through'}>
+              - [{ev.field}] "{ev.text}" ({ev.reason})
+            </div>
+          ))}
+        </div>
+      )}
       {currentCard.synthDebug.motifs && currentCard.synthDebug.motifs.length > 0 && (
         <div className="mb-2">
           <span className="text-stone-500 font-bold block mb-1">Motifs</span>

@@ -152,6 +152,8 @@ export interface GenerationResult {
   imageUrl: string;
   injectedPromptBlock?: string;
   usedReferences?: { id: string; name: string }[];
+  selectedReferences?: { id: string; name: string }[];
+  contributingReferences?: { id: string; name: string }[];
   usageMetadata?: any;
   autoSelectScores?: MatchingScoreLog[];
   synthDebug?: SynthesisDebug;
@@ -221,7 +223,10 @@ export const generateCardArt = async (request: CardGenerationRequest): Promise<G
 
   let injectedPromptBlock = "";
   let usedReferences: { id: string; name: string }[] = [];
+  let selectedReferences: { id: string; name: string }[] = [];
+  let contributingReferences: { id: string; name: string }[] = [];
   let autoSelectScores: MatchingScoreLog[] = [];
+  let synthDebug: SynthesisDebug | undefined;
 
   if (request.useVisualDB) {
     try {
@@ -239,21 +244,27 @@ export const generateCardArt = async (request: CardGenerationRequest): Promise<G
       
       if (request.dbAutoSelect && allDna.length > 0) {
         const selectedIds = limitedRefs.map(r => r.id);
-        autoSelectScores = getMatchingLogs(request.subject, request.cardType, request.archetype, allDna, selectedIds);
+        autoSelectScores = getMatchingLogs(request.subject, request.cardType, request.archetype, allDna, selectedIds, maxRefs);
       }
       
       if (limitedRefs.length > 0) {
+        const archetypeInstruction = ARCHETYPE_DEFINITIONS[request.archetype] || ARCHETYPE_DEFINITIONS[Archetype.Generic];
         const synth = synthesizeVisualDNA({
           references: limitedRefs,
           intensity: request.dbIntensity || 'medium',
           subject: request.subject,
           cardType: request.cardType,
           archetype: request.archetype,
-          userPrompt: request.subject
+          userPrompt: request.subject,
+          context: request.context,
+          complexity: request.complexity,
+          archetypePreset: archetypeInstruction
         });
         injectedPromptBlock = synth.promptBlock;
         usedReferences = synth.usedReferences;
-        var synthDebug = synth.debugInfo;
+        selectedReferences = synth.selectedReferences;
+        contributingReferences = synth.contributingReferences;
+        synthDebug = synth.debugInfo || undefined;
       }
     } catch (dbErr) {
       console.error("Error fetching or synthesizing visual DNA:", dbErr);
@@ -328,6 +339,8 @@ const response = await ai.models.generateContent({
             imageUrl: `data:${mimeType};base64,${base64Data}`,
             injectedPromptBlock,
             usedReferences,
+            selectedReferences,
+            contributingReferences,
             usageMetadata,
             autoSelectScores,
             synthDebug

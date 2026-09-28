@@ -1,6 +1,12 @@
-import { VisualDNA, SynthesisDebug, MatchDetail, DNAMatchingResult, MatchingScoreLog } from "../types";
+import { VisualDNA, SynthesisDebug, MatchDetail, DNAMatchingResult, MatchingScoreLog, CardType, Context, Complexity, Archetype } from "../types";
 import { VISUAL_TAG_KEYWORDS } from "./visualTags";
 import { parsePromptIntent } from "./promptParser";
+import { ARCHETYPE_DEFINITIONS } from "../constants";
+import {
+  SynthesisContext,
+  evaluateCandidateFragment,
+  ARCHETYPE_POLICY_RULES
+} from "./visualDnaPolicy";
 
 
 const normalizeText = (text: string) => {
@@ -220,43 +226,27 @@ export const calculateComplementaryScores = (
   
   const selected: { dna: VisualDNA, result: DNAMatchingResult }[] = [];
   const coveredCategories = new Set<string>();
-  const coveredMaterials = new Set<string>();
-  const coveredElements = new Set<string>();
   
   const first = remaining.shift();
   if (first) {
      selected.push(first);
      first.result.matchedCategories.forEach(c => coveredCategories.add(c));
-     if (first.dna.substanceProfile?.materials) first.dna.substanceProfile.materials.forEach(m => coveredMaterials.add(m));
-     if (first.dna.substanceProfile?.elements) first.dna.substanceProfile.elements.forEach(e => coveredElements.add(e));
   }
   
   while (selected.length < maxReferences && remaining.length > 0) {
      remaining.forEach(item => {
         let divBonus = 0;
-        let redPenalty = 0;
         
+        // Only award diversity bonus for categories that actually matched the prompt query
         item.result.matchedCategories.forEach(cat => {
            if (!coveredCategories.has(cat)) divBonus += 1.5;
         });
         
-        if (item.dna.substanceProfile?.materials) {
-           item.dna.substanceProfile.materials.forEach(m => {
-              if (!coveredMaterials.has(m)) divBonus += 1;
-              else redPenalty += 0.5;
-           });
-        }
-        
-        if (item.dna.substanceProfile?.elements) {
-           item.dna.substanceProfile.elements.forEach(e => {
-              if (!coveredElements.has(e)) divBonus += 1;
-              else redPenalty += 0.5;
-           });
-        }
-        
+        // Do not penalize similar references that improve coherence, and do not
+        // give bonuses for unrequested materials or elements.
         item.result.diversityBonus = divBonus;
-        item.result.redundancyPenalty = redPenalty;
-        item.result.finalScore = item.result.baseScore + divBonus - redPenalty;
+        item.result.redundancyPenalty = 0;
+        item.result.finalScore = item.result.baseScore + divBonus;
      });
      
      remaining.sort((a, b) => b.result.finalScore - a.result.finalScore);
@@ -265,8 +255,6 @@ export const calculateComplementaryScores = (
      if (nextBest && nextBest.result.finalScore > 0) {
         selected.push(nextBest);
         nextBest.result.matchedCategories.forEach(c => coveredCategories.add(c));
-        if (nextBest.dna.substanceProfile?.materials) nextBest.dna.substanceProfile.materials.forEach(m => coveredMaterials.add(m));
-        if (nextBest.dna.substanceProfile?.elements) nextBest.dna.substanceProfile.elements.forEach(e => coveredElements.add(e));
      } else {
         break;
      }
@@ -321,13 +309,13 @@ export const getAutomaticReferences = (
   return finalSelection.map(item => item.dna);
 };
 
-
 export const getMatchingLogs = (
   subject: string,
   cardType: string,
   archetype: string,
   database: VisualDNA[],
-  selectedIds: string[]
+  selectedIds: string[],
+  maxReferences: number = 3
 ): MatchingScoreLog[] => {
   const { affirmativeText, excludedWords } = parsePromptIntent(subject);
   const queryWords = [affirmativeText, cardType, archetype].filter(Boolean).join(" ");
@@ -337,7 +325,8 @@ export const getMatchingLogs = (
     return { dna, result: scoreVisualDNAReferenceBase(dna, normalizedQuery, cardType, excludedWords) };
   });
   
-  const scoredWithBonuses = calculateComplementaryScores([...scored].filter(s => s.result.baseScore > 0), 5);
+  // Use the exact maxReferences as generation
+  const scoredWithBonuses = calculateComplementaryScores([...scored].filter(s => s.result.baseScore > 0), maxReferences);
   
   return database.map(dna => {
     const autoScoreResult = scoredWithBonuses.find(s => s.dna.id === dna.id)?.result || scored.find(s => s.dna.id === dna.id)!.result;
@@ -357,207 +346,463 @@ export interface SynthesizeParams {
   references: VisualDNA[];
   intensity: "low" | "medium" | "high";
   subject: string;
-  cardType: string;
-  archetype: string;
-  userPrompt: string;
+  cardType: CardType | string;
+  archetype: Archetype | string;
+  userPrompt?: string;
+  context?: Context | string;
+  complexity?: Complexity | string;
+  archetypePreset?: string;
 }
 
 export const synthesizeVisualDNA = (
   params: SynthesizeParams
-): { promptBlock: string; usedReferences: { id: string; name: string }[], debugInfo: SynthesisDebug | null } => {
+): {
+  promptBlock: string;
+  usedReferences: { id: string; name: string }[];
+  selectedReferences: { id: string; name: string }[];
+  contributingReferences?: { id: string; name: string }[];
+  debugInfo: SynthesisDebug | null;
+} => {
   const { references, intensity, subject, cardType, archetype, userPrompt } = params;
   
+  const selectedReferences = references.map(r => ({ id: r.id, name: r.name || "Unnamed Reference" }));
+
   if (references.length === 0) {
-    return { promptBlock: "", usedReferences: [], debugInfo: null };
+    return { promptBlock: "", usedReferences: [], selectedReferences: [], debugInfo: null };
   }
+
+  const { affirmativeText, excludedWords } = parsePromptIntent(userPrompt || subject);
+  const resolvedPreset = params.archetypePreset || ARCHETYPE_DEFINITIONS[archetype as Archetype] || ARCHETYPE_DEFINITIONS[Archetype.Generic];
+
+  const synthesisContext: SynthesisContext = {
+    subject,
+    affirmativeText,
+    excludedWords,
+    cardType,
+    context: params.context || Context.Character,
+    complexity: params.complexity || Complexity.Medium,
+    archetype,
+    archetypePreset: resolvedPreset,
+    intensity
+  };
 
   const debugInfo: SynthesisDebug = {
     motifs: [],
     avoidRules: [],
-    identityBlocked: []
+    identityBlocked: [],
+    evaluations: [],
+    contributingReferenceIds: [],
+    allContributionsDiscarded: false
   };
 
-  const getBest = (field: keyof VisualDNA, fallbackField: keyof VisualDNA, scoreKey: keyof VisualDNA['scores']): string => {
+  const contributingRefIds = new Set<string>();
+
+  const evaluateAndRecord = (
+    rawFragment: string,
+    field: string,
+    ref: VisualDNA
+  ): { included: boolean; text: string } => {
+    if (!rawFragment || typeof rawFragment !== "string" || !rawFragment.trim()) {
+      return { included: false, text: "" };
+    }
+
+    const evalRes = evaluateCandidateFragment(rawFragment, field, ref, synthesisContext);
+    
+    if (evalRes.blockedIdentity) {
+      if (!debugInfo.identityBlocked.includes(evalRes.blockedIdentity)) {
+        debugInfo.identityBlocked.push(evalRes.blockedIdentity);
+      }
+    }
+
+    if (evalRes.decision === "included" && evalRes.text) {
+      contributingRefIds.add(ref.id);
+      debugInfo.evaluations!.push({
+        referenceId: ref.id,
+        referenceName: ref.name || "Unnamed",
+        field,
+        text: rawFragment.trim(),
+        decision: "included",
+        reason: evalRes.reason
+      });
+      return { included: true, text: evalRes.text };
+    }
+
+    debugInfo.evaluations!.push({
+      referenceId: ref.id,
+      referenceName: ref.name || "Unnamed",
+      field,
+      text: rawFragment.trim(),
+      decision: "discarded",
+      reason: evalRes.reason
+    });
+    return { included: false, text: "" };
+  };
+
+  const getBestSlot = (
+    primaryField: keyof VisualDNA,
+    fallbackFields: (keyof VisualDNA)[],
+    scoreKey: keyof VisualDNA['scores']
+  ): string => {
     const sorted = [...references].sort((a, b) => {
       const scoreA = (a.scores && typeof a.scores[scoreKey] === 'number') ? (a.scores[scoreKey] as number) : 0.5;
       const scoreB = (b.scores && typeof b.scores[scoreKey] === 'number') ? (b.scores[scoreKey] as number) : 0.5;
       return scoreB - scoreA;
     });
-    const best = sorted[0];
-    if (!best) return "";
-    const val = best[field] || best[fallbackField] || best.summary;
-    return Array.isArray(val) ? val.join(", ") : String(val || "");
+
+    for (const ref of sorted) {
+      // 1. Check primary field
+      const val = ref[primaryField];
+      if (val) {
+        const items = Array.isArray(val) ? val : [String(val)];
+        for (const item of items) {
+          const res = evaluateAndRecord(item, String(primaryField), ref);
+          if (res.included && res.text) {
+            return res.text;
+          }
+        }
+      }
+
+      // 2. Check fallback fields (never summary)
+      for (const fbField of fallbackFields) {
+        const fbVal = ref[fbField];
+        if (fbVal) {
+          const items = Array.isArray(fbVal) ? fbVal : [String(fbVal)];
+          for (const item of items) {
+            const res = evaluateAndRecord(item, String(fbField), ref);
+            if (res.included && res.text) {
+              return res.text;
+            }
+          }
+        }
+      }
+    }
+
+    return "";
   };
 
-  const { affirmativeText, excludedWords } = parsePromptIntent(userPrompt || subject);
   const userPromptNorm = normalizeText(affirmativeText || userPrompt || subject);
 
-  const getArrayConcat = (field: keyof VisualDNA): string[] => {
-    return Array.from(new Set(
-      references.flatMap(r => {
-        const val = r[field];
-        if (Array.isArray(val)) return val.filter(v => typeof v === 'string' && v.trim() !== '');
-        if (typeof val === 'string' && val.trim() !== '') return val.split(',').map(s => s.trim());
-        return [];
-      })
-    ));
-  };
-
-  const isTermExcluded = (term: string): boolean => {
-    if (!excludedWords || excludedWords.size === 0 || !term) return false;
-    const norm = normalizeText(term);
-    if (!norm) return false;
-    if (excludedWords.has(norm)) return true;
-    return norm.split(/\s+/).some(w => excludedWords.has(w));
-  };
-
-  const isPositiveMotifRelevant = (motif: string): boolean => {
-     if (isTermExcluded(motif)) return false;
-     const words = motif.split(/\s+/).filter(w => w.length > 2 && !isTermExcluded(w));
-     let matches = 0;
-     words.forEach(w => {
-         const boundaryRegex = new RegExp("(^|\\s)" + escapeRegExp(normalizeText(w)) + "($|\\s)", 'i');
-         if (boundaryRegex.test(userPromptNorm) || boundaryRegex.test(normalizeText(affirmativeText)) || boundaryRegex.test(normalizeText(cardType))) {
-             matches++;
-         }
-     });
-     return matches > 0;
-  };
-
   const doesAvoidRuleContradict = (rule: string): boolean => {
-     // Strip avoid prefixes
-     const cleanRule = rule.replace(/^(?:avoid|do not include|don't include|n[ãa]o incluir|evitar)\s+/i, "").trim();
-     // Split compound avoid rule by conjunctions / delimiters
-     const subItems = cleanRule.split(/\b(?:and|or|e|ou|nem|nor)\b|[,;/]/i);
-     for (const item of subItems) {
-        const words = item.split(/\s+/).map(w => normalizeText(w)).filter(w => w.length > 2);
-        for (const w of words) {
-           // If the word was excluded by the user (e.g. "no dragon"), avoiding it does NOT contradict!
-           if (excludedWords.has(w)) continue;
+    const cleanRule = rule.replace(/^(?:avoid|do not include|don't include|n[ãa]o incluir|evitar)\s+/i, "").trim();
+    const subItems = cleanRule.split(/\b(?:and|or|e|ou|nem|nor)\b|[,;/]/i);
+    for (const item of subItems) {
+      const words = item.split(/\s+/).map(w => normalizeText(w)).filter(w => w.length > 2);
+      for (const w of words) {
+        if (excludedWords.has(w)) continue;
 
-           // If the word matches what the user affirmatively requested, avoiding it DOES contradict!
-           const boundaryRegex = new RegExp("(^|\\s)" + escapeRegExp(w) + "($|\\s)", 'i');
-           if (boundaryRegex.test(userPromptNorm) || boundaryRegex.test(normalizeText(affirmativeText)) || boundaryRegex.test(normalizeText(cardType))) {
-              return true; // Contradiction found!
-           }
+        const boundaryRegex = new RegExp("(^|\\s)" + escapeRegExp(w) + "($|\\s)", 'i');
+        if (boundaryRegex.test(userPromptNorm) || boundaryRegex.test(normalizeText(affirmativeText)) || boundaryRegex.test(normalizeText(cardType))) {
+          return true;
         }
-     }
-     return false;
+
+        // Check if archetype preset specifically requires this signature trait
+        const archRules = ARCHETYPE_POLICY_RULES[archetype as string];
+        if (archRules && archRules.signatureTerms.some(st => normalizeText(st).includes(w))) {
+          return true;
+        }
+      }
+    }
+    return false;
   };
 
-  const styleFragments = getArrayConcat("stylePromptFragments");
-  let contentMotifs = getArrayConcat("contentMotifs");
-  const visualMotifs = getArrayConcat("visualMotifs");
-  const styleAnchorsList = getArrayConcat("styleAnchors");
-  
-  const usedMotifs: string[] = [];
-  [...contentMotifs, ...visualMotifs].forEach(motif => {
-      const isRelevant = isPositiveMotifRelevant(motif);
-      debugInfo.motifs.push({
-         motif,
-         used: isRelevant,
-         reason: isRelevant ? "Matches user prompt context." : "Not relevant to current prompt."
-      });
-      if (isRelevant) usedMotifs.push(motif);
-  });
-  
-  const identitySpecifics = getArrayConcat("identitySpecificDetails");
-  identitySpecifics.forEach(id => {
-      debugInfo.identityBlocked.push(id);
-  });
-  
-  const styleAnchorsStr = [...new Set([...styleFragments, ...styleAnchorsList])].slice(0, intensity === "high" ? 10 : intensity === "medium" ? 5 : 3).join(", ");
-  const motifsStr = [...new Set(usedMotifs)].slice(0, 5).join(", ");
+  // Evaluate Style Anchors and Prompt Fragments
+  const maxAnchors = intensity === "low" ? 2 : intensity === "medium" ? 4 : 6;
+  const acceptedAnchors: string[] = [];
+  const seenAnchorTexts = new Set<string>();
 
-  const rendering = getBest("rendering", "linework", "rendering");
-  const shapeLanguage = getBest("shapeLanguage", "silhouette", "silhouette");
-  const palette = getBest("paletteLogic", "palette", "palette");
-  const composition = getBest("compositionRecipe", "composition", "composition");
-  const pose = getBest("pose", "summary", "pose");
-  const framing = getBest("framing", "summary", "pose");
-  const materials = getBest("materialBehavior", "materials", "materials");
-  const focalAnchors = getBest("focalAnchors", "hierarchy", "details");
-  const details = getBest("detailPlacement", "details", "details");
-  const background = getBest("background", "summary", "background");
-  const effects = getBest("energyDesign", "effects", "effects");
-  
+  for (const ref of references) {
+    const fragments: string[] = [];
+    if (Array.isArray(ref.stylePromptFragments)) fragments.push(...ref.stylePromptFragments);
+    if (typeof ref.styleAnchors === "string" && ref.styleAnchors.trim()) {
+      fragments.push(...ref.styleAnchors.split(/[,;]+/).map(s => s.trim()).filter(Boolean));
+    }
+
+    for (const frag of fragments) {
+      const normFrag = normalizeText(frag);
+      if (!normFrag || seenAnchorTexts.has(normFrag)) continue;
+      seenAnchorTexts.add(normFrag);
+
+      if (acceptedAnchors.length < maxAnchors) {
+        const res = evaluateAndRecord(frag, "styleAnchors", ref);
+        if (res.included && res.text) {
+          acceptedAnchors.push(res.text);
+        }
+      } else {
+        // Record as discarded due to intensity limit
+        debugInfo.evaluations!.push({
+          referenceId: ref.id,
+          referenceName: ref.name || "Unnamed",
+          field: "styleAnchors",
+          text: frag,
+          decision: "discarded",
+          reason: "Exceeds intensity limit for style anchors."
+        });
+      }
+    }
+  }
+
+  // Evaluate Motifs
+  const usedMotifs: string[] = [];
+  const seenMotifTexts = new Set<string>();
+  const maxMotifs = intensity === "low" ? 0 : intensity === "medium" ? 3 : 5;
+
+  for (const ref of references) {
+    const rawMotifs: string[] = [];
+    if (Array.isArray(ref.contentMotifs)) rawMotifs.push(...ref.contentMotifs);
+    if (typeof ref.visualMotifs === "string" && ref.visualMotifs.trim()) {
+      rawMotifs.push(...ref.visualMotifs.split(/[,;]+/).map(s => s.trim()).filter(Boolean));
+    }
+
+    for (const motif of rawMotifs) {
+      const normMotif = normalizeText(motif);
+      if (!normMotif || seenMotifTexts.has(normMotif)) continue;
+      seenMotifTexts.add(normMotif);
+
+      // Check if motif contains excluded words
+      const words = normMotif.split(/\s+/).filter(w => w.length > 2);
+      const isExcluded = words.some(w => excludedWords.has(w));
+      if (isExcluded) {
+        debugInfo.motifs.push({ motif, used: false, reason: "Contains user-excluded word." });
+        debugInfo.evaluations!.push({
+          referenceId: ref.id,
+          referenceName: ref.name || "Unnamed",
+          field: "motifs",
+          text: motif,
+          decision: "discarded",
+          reason: "Contains user-excluded word."
+        });
+        continue;
+      }
+
+      // Check prompt relevance
+      const isRelevant = words.some(w => {
+        const boundaryRegex = new RegExp("(^|\\s)" + escapeRegExp(w) + "($|\\s)", 'i');
+        return boundaryRegex.test(userPromptNorm) || boundaryRegex.test(normalizeText(affirmativeText)) || boundaryRegex.test(normalizeText(cardType));
+      });
+
+      if (!isRelevant) {
+        debugInfo.motifs.push({ motif, used: false, reason: "Not relevant to current prompt context." });
+        debugInfo.evaluations!.push({
+          referenceId: ref.id,
+          referenceName: ref.name || "Unnamed",
+          field: "motifs",
+          text: motif,
+          decision: "discarded",
+          reason: "Not relevant to current prompt context."
+        });
+        continue;
+      }
+
+      if (usedMotifs.length < maxMotifs) {
+        const res = evaluateAndRecord(motif, "motifs", ref);
+        if (res.included && res.text) {
+          usedMotifs.push(res.text);
+          debugInfo.motifs.push({ motif, used: true, reason: "Matches user prompt context." });
+        } else {
+          debugInfo.motifs.push({ motif, used: false, reason: "Filtered by archetype or context policy." });
+        }
+      } else {
+        debugInfo.motifs.push({ motif, used: false, reason: "Exceeds intensity limit for motifs." });
+        debugInfo.evaluations!.push({
+          referenceId: ref.id,
+          referenceName: ref.name || "Unnamed",
+          field: "motifs",
+          text: motif,
+          decision: "discarded",
+          reason: "Exceeds intensity limit for motifs."
+        });
+      }
+    }
+  }
+
+  // Semantic slot resolutions based on intensity
+  const rendering = getBestSlot("rendering", ["linework"], "rendering");
+  const composition = getBestSlot("compositionRecipe", ["composition", "framing"], "composition");
+
+  const shapeLanguage = intensity !== "low" ? getBestSlot("shapeLanguage", ["silhouette"], "silhouette") : "";
+  const palette = intensity !== "low" ? getBestSlot("paletteLogic", ["palette"], "palette") : "";
+
+  let pose = "";
+  let materials = "";
+  let focalAnchors = "";
+  let details = "";
+  let background = "";
+  let effects = "";
+
+  if (intensity === "high") {
+    pose = getBestSlot("pose", ["framing"], "pose");
+    materials = getBestSlot("materialBehavior", ["materials"], "materials");
+    focalAnchors = getBestSlot("focalAnchors", ["hierarchy", "detailPlacement"], "details");
+    details = getBestSlot("detailPlacement", ["details"], "details");
+    background = getBestSlot("background", [], "background");
+    effects = getBestSlot("energyDesign", ["effects"], "effects");
+  }
+
+  // Profiles (filtered, only for medium and high)
   const primaryRef = references[0];
   let scaleProfileStr = "";
-  if (primaryRef.scaleProfile && primaryRef.scaleProfile.confidence >= 0.5) {
-     const sp = primaryRef.scaleProfile;
-     const forms = (sp.scaleForms || []).join(', ');
-     const cues = (sp.scaleCues || []).join(', ');
-     scaleProfileStr = "Scale: " + (sp.physicalScale || '') + ". Presence: " + (sp.perceivedPresence || '') + ". Forms: " + forms + ". Cues: " + cues + ".";
-  }
-  
   let substanceProfileStr = "";
-  if (primaryRef.substanceProfile && primaryRef.substanceProfile.confidence >= 0.5) {
-     const sp = primaryRef.substanceProfile;
-     const mat = (sp.materials || []).slice(0, intensity === "medium" ? 2 : 4).join(', ');
-     const el = (sp.elements || []).join(', ');
-     const apps = (sp.elementApplications || []).join(', ');
-     substanceProfileStr = "Materials: " + mat + ". Elements: " + el + ". Applications: " + apps + ".";
+
+  if (intensity !== "low" && primaryRef) {
+    if (primaryRef.scaleProfile && primaryRef.scaleProfile.confidence >= 0.5) {
+      const sp = primaryRef.scaleProfile;
+      const forms = (sp.scaleForms || []).filter(f => evaluateAndRecord(f, "scaleForms", primaryRef).included).join(", ");
+      const cues = (sp.scaleCues || []).filter(c => evaluateAndRecord(c, "scaleCues", primaryRef).included).join(", ");
+      if (forms || cues) {
+        scaleProfileStr = `Forms: ${forms || 'standard'}. Cues: ${cues || 'proportional'}.`;
+      }
+    }
+
+    if (primaryRef.substanceProfile && primaryRef.substanceProfile.confidence >= 0.5) {
+      const sp = primaryRef.substanceProfile;
+      const maxMat = intensity === "medium" ? 2 : 4;
+      const validMats = (sp.materials || [])
+        .map(m => evaluateAndRecord(m, "substanceMaterials", primaryRef))
+        .filter(r => r.included && r.text)
+        .slice(0, maxMat)
+        .map(r => r.text);
+      
+      const validElements = (sp.elements || [])
+        .map(e => evaluateAndRecord(e, "substanceElements", primaryRef))
+        .filter(r => r.included && r.text)
+        .map(r => r.text);
+
+      if (validMats.length > 0 || validElements.length > 0) {
+        substanceProfileStr = [
+          validMats.length > 0 ? `Materials: ${validMats.join(", ")}` : "",
+          validElements.length > 0 ? `Elements: ${validElements.join(", ")}` : ""
+        ].filter(Boolean).join(". ") + ".";
+      }
+    }
   }
 
-  const universalAvoids = getArrayConcat("universalQualityAvoids");
-  const styleAvoids = getArrayConcat("styleSpecificAvoids");
-  const contentAvoids = getArrayConcat("contentSpecificAvoids");
-  
+  // Avoid rules
   const usedAvoids: string[] = [];
-  
-  universalAvoids.forEach(rule => {
-     usedAvoids.push(rule);
-     debugInfo.avoidRules.push({ rule, source: "universal", applied: true, reason: "Broadly applicable quality rule." });
-  });
-  
-  styleAvoids.forEach(rule => {
-     usedAvoids.push(rule);
-     debugInfo.avoidRules.push({ rule, source: "style", applied: true, reason: "Applicable to the visual direction." });
-  });
-  
-  contentAvoids.forEach(rule => {
-     const contradicts = doesAvoidRuleContradict(rule);
-     if (contradicts) {
-        debugInfo.avoidRules.push({ rule, source: "content", applied: false, reason: "Contradicts current user prompt context." });
-     } else {
-        usedAvoids.push(rule);
-        debugInfo.avoidRules.push({ rule, source: "content", applied: true, reason: "Does not contradict current prompt." });
-     }
+  const seenAvoids = new Set<string>();
+
+  const processAvoidRule = (rule: string, source: string, ref: VisualDNA) => {
+    if (!rule || typeof rule !== "string") return;
+    const norm = normalizeText(rule);
+    if (!norm || seenAvoids.has(norm)) return;
+    seenAvoids.add(norm);
+
+    const contradicts = doesAvoidRuleContradict(rule);
+    if (contradicts) {
+      debugInfo.avoidRules.push({ rule, source, applied: false, reason: "Contradicts current user prompt context." });
+      debugInfo.evaluations!.push({
+        referenceId: ref.id,
+        referenceName: ref.name || "Unnamed",
+        field: "avoidRules",
+        text: rule,
+        decision: "discarded",
+        reason: "Contradicts current user prompt context."
+      });
+    } else {
+      debugInfo.avoidRules.push({ rule, source, applied: true, reason: "Applicable quality/style avoidance." });
+      debugInfo.evaluations!.push({
+        referenceId: ref.id,
+        referenceName: ref.name || "Unnamed",
+        field: "avoidRules",
+        text: rule,
+        decision: "included",
+        reason: "Applicable avoidance constraint."
+      });
+      usedAvoids.push(rule);
+    }
+  };
+
+  references.forEach(ref => {
+    if (Array.isArray(ref.universalQualityAvoids)) {
+      ref.universalQualityAvoids.forEach(r => processAvoidRule(r, "universal", ref));
+    }
+    if (Array.isArray(ref.styleSpecificAvoids)) {
+      ref.styleSpecificAvoids.forEach(r => processAvoidRule(r, "style", ref));
+    }
+    if (Array.isArray(ref.contentSpecificAvoids)) {
+      ref.contentSpecificAvoids.forEach(r => processAvoidRule(r, "content", ref));
+    }
+    if (Array.isArray(ref.negativePrompt)) {
+      ref.negativePrompt.forEach(r => processAvoidRule(r, "legacy", ref));
+    }
+    if (typeof ref.avoidRules === "string" && ref.avoidRules.trim()) {
+      ref.avoidRules.split(/[,;]+/).map(s => s.trim()).filter(Boolean).forEach(r => processAvoidRule(r, "legacy", ref));
+    }
   });
 
-  [...getArrayConcat("negativePrompt"), ...getArrayConcat("avoidRules")].forEach(rule => {
-     const contradicts = doesAvoidRuleContradict(rule);
-     if (contradicts) {
-        debugInfo.avoidRules.push({ rule, source: "legacy", applied: false, reason: "Contradicts current user prompt context." });
-     } else {
-        usedAvoids.push(rule);
-        debugInfo.avoidRules.push({ rule, source: "legacy", applied: true, reason: "Does not contradict current prompt." });
-     }
-  });
+  const allNegative = Array.from(new Set(usedAvoids)).slice(0, 10).join(", ");
 
-  const allNegative = Array.from(new Set(usedAvoids)).slice(0, 15).join(", ");
-
+  // Build the final prompt block cleanly
   let promptBlock = "";
 
-  if (intensity === "low") {
-    promptBlock = "VISUAL DNA DIRECTION:\n- Style Anchors: " + styleAnchorsStr.slice(0, 100) + "\n- Rendering: " + rendering + "\n- Composition: " + composition + "\n- Avoid: " + (allNegative ? allNegative + ", " : "") + "photorealism, generic concept art.";
-  } else if (intensity === "medium") {
-    promptBlock = "VISUAL DNA DIRECTION:\n- Style Anchors: " + styleAnchorsStr + "\n- Motifs: " + motifsStr + "\n- Rendering: " + rendering + "\n- Silhouette & Shape: " + shapeLanguage + "\n- Profiles: " + scaleProfileStr + " " + substanceProfileStr + "\n- Palette: " + palette + "\n- Avoid: " + (allNegative ? allNegative + ", " : "") + "photorealism, generic concept art.";
+  if (contributingRefIds.size === 0) {
+    debugInfo.allContributionsDiscarded = true;
+    promptBlock = "VISUAL DNA DIRECTION (SUBORDINATE GUIDANCE):\n[All evaluated database fragments were safely discarded as incompatible with the prompt or archetype. Strictly follow the user description and archetype preset.]";
   } else {
-    let relationshipStr = "";
-    if (primaryRef.subjects && primaryRef.subjects.length > 1) {
-       relationshipStr = "Multiple Subjects: " + primaryRef.subjects.map(s => "[" + s.visualRole + "] " + s.category + " (" + s.physicalScale + ")").join(", ") + ".";
-    }
-    if (primaryRef.scaleRelationships && primaryRef.scaleRelationships.length > 0) {
-       relationshipStr += " Scale Relationships: " + primaryRef.scaleRelationships.map(r => r.subjectA + " " + r.relationship + " " + r.subjectB).join(", ") + ".";
+    const lines: string[] = [
+      "VISUAL DNA DIRECTION (SUBORDINATE GUIDANCE):",
+      "[Priority: Subject description and Context Focus take absolute precedence. Archetype preset defines artistic identity. DNA provides subordinate illustration technique only; never override the user's description, requested colors/materials, or archetype boundaries.]"
+    ];
+
+    if (acceptedAnchors.length > 0) {
+      lines.push(`- Style Anchors: ${acceptedAnchors.join(", ")}`);
     }
 
-    promptBlock = "VISUAL DNA DIRECTION:\n- Style Anchors & Prompt Fragments: " + styleAnchorsStr + "\n- Content Motifs: " + motifsStr + "\n- Rendering: " + rendering + "\n- Palette & Color Logic: " + palette + "\n- Silhouette & Shape Language: " + shapeLanguage + "\n- Profiles: " + scaleProfileStr + " " + substanceProfileStr + " " + relationshipStr + "\n- Composition & Camera: " + composition + ". " + framing + "\n- Pose & Motion: " + pose + "\n- Material Behavior: " + materials + "\n- Focal Hierarchy & Anchors: " + focalAnchors + "\n- Detail Placement: " + details + "\n- Background: " + background + "\n- Effects & Energy: " + effects + "\n- Avoid: " + (allNegative ? allNegative + ", " : "") + "photorealism, realistic portrait painting, western oil painting, 3D render look, plastic CGI look, generic concept art and flat illustration unless explicitly requested.\n\nCRITICAL SAFETY RULE: Use the Artstyle Database only as abstract visual guidance. Do not copy characters, exact costumes, logos, symbols, watermarks, card borders, text, layouts, poses or identifiable artwork. Create an original illustration using only general visual traits.";
+    if (intensity !== "low" && usedMotifs.length > 0) {
+      lines.push(`- Motifs: ${usedMotifs.join(", ")}`);
+    }
+
+    if (rendering) {
+      lines.push(`- Rendering: ${rendering}`);
+    }
+
+    if (intensity !== "low" && shapeLanguage) {
+      lines.push(`- Silhouette & Shape: ${shapeLanguage}`);
+    }
+
+    if (intensity !== "low" && (scaleProfileStr || substanceProfileStr)) {
+      const profStr = [scaleProfileStr, substanceProfileStr].filter(Boolean).join(" ");
+      lines.push(`- Profiles: ${profStr}`);
+    }
+
+    if (palette) {
+      lines.push(`- Palette Logic: ${palette}`);
+    }
+
+    if (composition) {
+      lines.push(`- Composition & Framing: ${composition}`);
+    }
+
+    if (intensity === "high") {
+      if (pose) lines.push(`- Pose & Motion: ${pose}`);
+      if (materials) lines.push(`- Material Behavior: ${materials}`);
+      if (focalAnchors) lines.push(`- Focal Hierarchy: ${focalAnchors}`);
+      if (details) lines.push(`- Detail Placement: ${details}`);
+      if (background) lines.push(`- Background: ${background}`);
+      if (effects) lines.push(`- Effects & Energy: ${effects}`);
+    }
+
+    const defaultAvoid = "photorealism, 3D render look, plastic CGI look, generic concept art";
+    const combinedAvoid = allNegative ? `${allNegative}, ${defaultAvoid}` : defaultAvoid;
+    lines.push(`- Avoid: ${combinedAvoid}`);
+
+    if (intensity === "high") {
+      lines.push("\nCRITICAL SAFETY RULE: Use the Artstyle Database only as abstract visual guidance. Do not copy characters, exact costumes, logos, symbols, watermarks, card borders, text, layouts, poses or identifiable artwork. Create an original illustration using only general visual traits.");
+    }
+
+    promptBlock = lines.join("\n");
   }
+
+  const contributingReferences = references
+    .filter(r => contributingRefIds.has(r.id))
+    .map(r => ({ id: r.id, name: r.name || "Unnamed Reference" }));
+
+  debugInfo.contributingReferenceIds = Array.from(contributingRefIds);
 
   return {
     promptBlock,
-    usedReferences: references.map(ref => ({ id: ref.id, name: ref.name })),
+    usedReferences: selectedReferences,
+    selectedReferences,
+    contributingReferences,
     debugInfo
   };
 };

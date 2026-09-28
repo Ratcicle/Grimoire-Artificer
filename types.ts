@@ -81,10 +81,22 @@ export interface MatchingScoreLog {
   details?: DNAMatchingResult;
 }
 
+export interface ContributionEvaluation {
+  referenceId: string;
+  referenceName: string;
+  field: string;
+  text: string;
+  decision: 'included' | 'discarded';
+  reason: string;
+}
+
 export interface SynthesisDebug {
   motifs: { motif: string; used: boolean; reason: string }[];
   avoidRules: { rule: string; source: string; applied: boolean; reason: string }[];
   identityBlocked: string[];
+  evaluations?: ContributionEvaluation[];
+  contributingReferenceIds?: string[];
+  allContributionsDiscarded?: boolean;
 }
 
 export interface GeneratedCard {
