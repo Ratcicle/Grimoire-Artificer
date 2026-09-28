@@ -408,9 +408,10 @@ export const synthesizeVisualDNA = (
 
     const evalRes = evaluateCandidateFragment(rawFragment, field, ref, synthesisContext);
     
-    if (evalRes.blockedIdentity) {
-      if (!debugInfo.identityBlocked.includes(evalRes.blockedIdentity)) {
-        debugInfo.identityBlocked.push(evalRes.blockedIdentity);
+    const blockedList = evalRes.blockedIdentities || (evalRes.blockedIdentity ? [evalRes.blockedIdentity] : []);
+    for (const b of blockedList) {
+      if (!debugInfo.identityBlocked.includes(b)) {
+        debugInfo.identityBlocked.push(b);
       }
     }
 
@@ -420,7 +421,8 @@ export const synthesizeVisualDNA = (
         referenceId: ref.id,
         referenceName: ref.name || "Unnamed",
         field,
-        text: rawFragment.trim(),
+        text: evalRes.originalText || rawFragment.trim(),
+        cleanedText: evalRes.text !== rawFragment.trim() ? evalRes.text : undefined,
         decision: "included",
         reason: evalRes.reason
       });
@@ -431,7 +433,7 @@ export const synthesizeVisualDNA = (
       referenceId: ref.id,
       referenceName: ref.name || "Unnamed",
       field,
-      text: rawFragment.trim(),
+      text: evalRes.originalText || rawFragment.trim(),
       decision: "discarded",
       reason: evalRes.reason
     });
@@ -646,8 +648,22 @@ export const synthesizeVisualDNA = (
   if (intensity !== "low" && primaryRef) {
     if (primaryRef.scaleProfile && primaryRef.scaleProfile.confidence >= 0.5) {
       const sp = primaryRef.scaleProfile;
-      const forms = (sp.scaleForms || []).filter(f => evaluateAndRecord(f, "scaleForms", primaryRef).included).join(", ");
-      const cues = (sp.scaleCues || []).filter(c => evaluateAndRecord(c, "scaleCues", primaryRef).included).join(", ");
+      const validForms: string[] = [];
+      for (const f of (sp.scaleForms || [])) {
+        const res = evaluateAndRecord(f, "scaleForms", primaryRef);
+        if (res.included && res.text) {
+          validForms.push(res.text);
+        }
+      }
+      const validCues: string[] = [];
+      for (const c of (sp.scaleCues || [])) {
+        const res = evaluateAndRecord(c, "scaleCues", primaryRef);
+        if (res.included && res.text) {
+          validCues.push(res.text);
+        }
+      }
+      const forms = validForms.join(", ");
+      const cues = validCues.join(", ");
       if (forms || cues) {
         scaleProfileStr = `Forms: ${forms || 'standard'}. Cues: ${cues || 'proportional'}.`;
       }
@@ -656,16 +672,99 @@ export const synthesizeVisualDNA = (
     if (primaryRef.substanceProfile && primaryRef.substanceProfile.confidence >= 0.5) {
       const sp = primaryRef.substanceProfile;
       const maxMat = intensity === "medium" ? 2 : 4;
-      const validMats = (sp.materials || [])
-        .map(m => evaluateAndRecord(m, "substanceMaterials", primaryRef))
-        .filter(r => r.included && r.text)
-        .slice(0, maxMat)
-        .map(r => r.text);
-      
-      const validElements = (sp.elements || [])
-        .map(e => evaluateAndRecord(e, "substanceElements", primaryRef))
-        .filter(r => r.included && r.text)
-        .map(r => r.text);
+      const validMats: string[] = [];
+
+      const rawMats = sp.materials || [];
+      for (const rawMat of rawMats) {
+        if (!rawMat || typeof rawMat !== "string" || !rawMat.trim()) continue;
+        const evalRes = evaluateCandidateFragment(rawMat, "substanceMaterials", primaryRef, synthesisContext);
+        const blockedList = evalRes.blockedIdentities || (evalRes.blockedIdentity ? [evalRes.blockedIdentity] : []);
+        for (const b of blockedList) {
+          if (!debugInfo.identityBlocked.includes(b)) debugInfo.identityBlocked.push(b);
+        }
+
+        if (evalRes.decision !== "included" || !evalRes.text) {
+          debugInfo.evaluations!.push({
+            referenceId: primaryRef.id,
+            referenceName: primaryRef.name || "Unnamed",
+            field: "substanceMaterials",
+            text: rawMat.trim(),
+            decision: "discarded",
+            reason: evalRes.reason
+          });
+          continue;
+        }
+
+        if (validMats.length < maxMat) {
+          validMats.push(evalRes.text);
+          contributingRefIds.add(primaryRef.id);
+          debugInfo.evaluations!.push({
+            referenceId: primaryRef.id,
+            referenceName: primaryRef.name || "Unnamed",
+            field: "substanceMaterials",
+            text: rawMat.trim(),
+            cleanedText: evalRes.text !== rawMat.trim() ? evalRes.text : undefined,
+            decision: "included",
+            reason: evalRes.reason
+          });
+        } else {
+          debugInfo.evaluations!.push({
+            referenceId: primaryRef.id,
+            referenceName: primaryRef.name || "Unnamed",
+            field: "substanceMaterials",
+            text: rawMat.trim(),
+            decision: "discarded",
+            reason: "Exceeds intensity limit for substance materials."
+          });
+        }
+      }
+
+      const validElements: string[] = [];
+      const rawElements = sp.elements || [];
+      const maxElements = 2;
+      for (const rawEl of rawElements) {
+        if (!rawEl || typeof rawEl !== "string" || !rawEl.trim()) continue;
+        const evalRes = evaluateCandidateFragment(rawEl, "substanceElements", primaryRef, synthesisContext);
+        const blockedList = evalRes.blockedIdentities || (evalRes.blockedIdentity ? [evalRes.blockedIdentity] : []);
+        for (const b of blockedList) {
+          if (!debugInfo.identityBlocked.includes(b)) debugInfo.identityBlocked.push(b);
+        }
+
+        if (evalRes.decision !== "included" || !evalRes.text) {
+          debugInfo.evaluations!.push({
+            referenceId: primaryRef.id,
+            referenceName: primaryRef.name || "Unnamed",
+            field: "substanceElements",
+            text: rawEl.trim(),
+            decision: "discarded",
+            reason: evalRes.reason
+          });
+          continue;
+        }
+
+        if (validElements.length < maxElements) {
+          validElements.push(evalRes.text);
+          contributingRefIds.add(primaryRef.id);
+          debugInfo.evaluations!.push({
+            referenceId: primaryRef.id,
+            referenceName: primaryRef.name || "Unnamed",
+            field: "substanceElements",
+            text: rawEl.trim(),
+            cleanedText: evalRes.text !== rawEl.trim() ? evalRes.text : undefined,
+            decision: "included",
+            reason: evalRes.reason
+          });
+        } else {
+          debugInfo.evaluations!.push({
+            referenceId: primaryRef.id,
+            referenceName: primaryRef.name || "Unnamed",
+            field: "substanceElements",
+            text: rawEl.trim(),
+            decision: "discarded",
+            reason: "Exceeds limit for substance elements."
+          });
+        }
+      }
 
       if (validMats.length > 0 || validElements.length > 0) {
         substanceProfileStr = [
@@ -679,36 +778,68 @@ export const synthesizeVisualDNA = (
   // Avoid rules
   const usedAvoids: string[] = [];
   const seenAvoids = new Set<string>();
+  const MAX_AVOID_RULES = 10;
 
   const processAvoidRule = (rule: string, source: string, ref: VisualDNA) => {
     if (!rule || typeof rule !== "string") return;
-    const norm = normalizeText(rule);
-    if (!norm || seenAvoids.has(norm)) return;
-    seenAvoids.add(norm);
+    const trimmedRule = rule.trim();
+    if (!trimmedRule) return;
 
-    const contradicts = doesAvoidRuleContradict(rule);
-    if (contradicts) {
-      debugInfo.avoidRules.push({ rule, source, applied: false, reason: "Contradicts current user prompt context." });
+    const norm = normalizeText(trimmedRule);
+    if (!norm) return;
+
+    if (seenAvoids.has(norm)) {
+      debugInfo.avoidRules.push({ rule: trimmedRule, source, applied: false, reason: "Duplicated avoid rule." });
       debugInfo.evaluations!.push({
         referenceId: ref.id,
         referenceName: ref.name || "Unnamed",
         field: "avoidRules",
-        text: rule,
+        text: trimmedRule,
+        decision: "discarded",
+        reason: "Duplicated avoid rule."
+      });
+      return;
+    }
+    seenAvoids.add(norm);
+
+    const contradicts = doesAvoidRuleContradict(trimmedRule);
+    if (contradicts) {
+      debugInfo.avoidRules.push({ rule: trimmedRule, source, applied: false, reason: "Contradicts current user prompt context." });
+      debugInfo.evaluations!.push({
+        referenceId: ref.id,
+        referenceName: ref.name || "Unnamed",
+        field: "avoidRules",
+        text: trimmedRule,
         decision: "discarded",
         reason: "Contradicts current user prompt context."
       });
-    } else {
-      debugInfo.avoidRules.push({ rule, source, applied: true, reason: "Applicable quality/style avoidance." });
+      return;
+    }
+
+    if (usedAvoids.length >= MAX_AVOID_RULES) {
+      debugInfo.avoidRules.push({ rule: trimmedRule, source, applied: false, reason: "Exceeds maximum limit of negative rules." });
       debugInfo.evaluations!.push({
         referenceId: ref.id,
         referenceName: ref.name || "Unnamed",
         field: "avoidRules",
-        text: rule,
-        decision: "included",
-        reason: "Applicable avoidance constraint."
+        text: trimmedRule,
+        decision: "discarded",
+        reason: "Exceeds maximum limit of negative rules."
       });
-      usedAvoids.push(rule);
+      return;
     }
+
+    debugInfo.avoidRules.push({ rule: trimmedRule, source, applied: true, reason: "Applicable quality/style avoidance." });
+    debugInfo.evaluations!.push({
+      referenceId: ref.id,
+      referenceName: ref.name || "Unnamed",
+      field: "avoidRules",
+      text: trimmedRule,
+      decision: "included",
+      reason: "Applicable avoidance constraint."
+    });
+    usedAvoids.push(trimmedRule);
+    contributingRefIds.add(ref.id);
   };
 
   references.forEach(ref => {
@@ -721,15 +852,36 @@ export const synthesizeVisualDNA = (
     if (Array.isArray(ref.contentSpecificAvoids)) {
       ref.contentSpecificAvoids.forEach(r => processAvoidRule(r, "content", ref));
     }
-    if (Array.isArray(ref.negativePrompt)) {
-      ref.negativePrompt.forEach(r => processAvoidRule(r, "legacy", ref));
+
+    // Support both string and array for negativePrompt
+    if (ref.negativePrompt) {
+      const negs = Array.isArray(ref.negativePrompt)
+        ? ref.negativePrompt
+        : typeof ref.negativePrompt === "string"
+          ? ref.negativePrompt.split(/[,;]+/).map(s => s.trim()).filter(Boolean)
+          : [];
+      negs.forEach(r => {
+        // Skip generic placeholder tags like "low quality", "worst quality", "lowres", "bad quality"
+        const norm = normalizeText(r);
+        if (norm === "low quality" || norm === "worst quality" || norm === "bad quality" || norm === "lowres" || norm === "poor quality") {
+          return;
+        }
+        processAvoidRule(r, "negativePrompt", ref);
+      });
     }
-    if (typeof ref.avoidRules === "string" && ref.avoidRules.trim()) {
-      ref.avoidRules.split(/[,;]+/).map(s => s.trim()).filter(Boolean).forEach(r => processAvoidRule(r, "legacy", ref));
+
+    // Support both string and array for avoidRules
+    if (ref.avoidRules) {
+      const avoids = Array.isArray(ref.avoidRules)
+        ? ref.avoidRules
+        : typeof ref.avoidRules === "string"
+          ? ref.avoidRules.split(/[,;]+/).map(s => s.trim()).filter(Boolean)
+          : [];
+      avoids.forEach(r => processAvoidRule(r, "avoidRules", ref));
     }
   });
 
-  const allNegative = Array.from(new Set(usedAvoids)).slice(0, 10).join(", ");
+  const allNegative = usedAvoids.join(", ");
 
   // Build the final prompt block cleanly
   let promptBlock = "";
@@ -738,6 +890,7 @@ export const synthesizeVisualDNA = (
     debugInfo.allContributionsDiscarded = true;
     promptBlock = "VISUAL DNA DIRECTION (SUBORDINATE GUIDANCE):\n[All evaluated database fragments were safely discarded as incompatible with the prompt or archetype. Strictly follow the user description and archetype preset.]";
   } else {
+    debugInfo.allContributionsDiscarded = false;
     const lines: string[] = [
       "VISUAL DNA DIRECTION (SUBORDINATE GUIDANCE):",
       "[Priority: Subject description and Context Focus take absolute precedence. Archetype preset defines artistic identity. DNA provides subordinate illustration technique only; never override the user's description, requested colors/materials, or archetype boundaries.]"

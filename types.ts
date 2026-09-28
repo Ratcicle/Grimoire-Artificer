@@ -86,6 +86,7 @@ export interface ContributionEvaluation {
   referenceName: string;
   field: string;
   text: string;
+  cleanedText?: string;
   decision: 'included' | 'discarded';
   reason: string;
 }
@@ -106,6 +107,8 @@ export interface GeneratedCard {
   timestamp: number;
   injectedPromptBlock?: string;
   usedReferences?: { id: string; name: string }[];
+  selectedReferences?: { id: string; name: string }[];
+  contributingReferences?: { id: string; name: string }[];
   autoSelectScores?: MatchingScoreLog[];
   synthDebug?: SynthesisDebug;
 }

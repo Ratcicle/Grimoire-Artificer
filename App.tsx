@@ -67,6 +67,8 @@ const App: React.FC = () => {
         timestamp: Date.now(),
         injectedPromptBlock: result.injectedPromptBlock,
         usedReferences: result.usedReferences,
+        selectedReferences: result.selectedReferences || result.usedReferences,
+        contributingReferences: result.contributingReferences || [],
         autoSelectScores: result.autoSelectScores,
         synthDebug: result.synthDebug
       };
@@ -307,17 +309,41 @@ const App: React.FC = () => {
                                     Injected Visual DNA
                                   </p>
                                   <div className="flex flex-wrap gap-1 mb-3">
-                                    {currentCard.usedReferences && currentCard.usedReferences.length > 0 ? (
-                                      currentCard.usedReferences.map((ref) => (
-                                        <span key={ref.id} className="text-[9px] bg-stone-950 text-amber-400 px-2 py-0.5 rounded border border-amber-900/40">
-                                          {ref.name} <span className="text-[7px] text-stone-500 uppercase font-mono">(Contributed)</span>
-                                        </span>
-                                      ))
-                                    ) : (
-                                      <span className="text-[9px] bg-stone-950/80 text-stone-500 italic px-2 py-0.5 rounded border border-stone-800">
-                                        No database fragments contributed (all safely filtered)
-                                      </span>
-                                    )}
+                                    {(() => {
+                                      const selectedRefs = currentCard.selectedReferences || currentCard.usedReferences || [];
+                                      const contributingIds = new Set((currentCard.contributingReferences || []).map(r => r.id));
+                                      if (selectedRefs.length === 0) {
+                                        return (
+                                          <span className="text-[9px] bg-stone-950/80 text-stone-500 italic px-2 py-0.5 rounded border border-stone-800">
+                                            No database fragments contributed (all safely filtered)
+                                          </span>
+                                        );
+                                      }
+                                      return selectedRefs.map((ref) => {
+                                        const didContribute = contributingIds.has(ref.id);
+                                        return (
+                                          <span
+                                            key={ref.id}
+                                            className={`text-[9px] px-2 py-0.5 rounded border flex items-center gap-1.5 ${
+                                              didContribute
+                                                ? 'bg-stone-950 text-amber-400 border-amber-900/40'
+                                                : 'bg-stone-950/60 text-stone-500 border-stone-800/60 opacity-80'
+                                            }`}
+                                          >
+                                            <span>{ref.name}</span>
+                                            <span
+                                              className={`text-[7px] uppercase font-mono px-1 py-0.2 rounded ${
+                                                didContribute
+                                                  ? 'text-green-400 bg-green-950/40 border border-green-900/30 font-semibold'
+                                                  : 'text-stone-500 bg-stone-900/80 border border-stone-800'
+                                              }`}
+                                            >
+                                              {didContribute ? 'Contributed' : 'Discarded'}
+                                            </span>
+                                          </span>
+                                        );
+                                      });
+                                    })()}
                                   </div>
                                   {currentCard.injectedPromptBlock && (
                                     <details className="group">
@@ -335,16 +361,21 @@ const App: React.FC = () => {
     </div>
     <div className="space-y-1.5 max-h-48 overflow-y-auto scrollbar-thin pr-1 font-mono text-[9px]">
       {currentCard.synthDebug.allContributionsDiscarded && (
-        <div className="text-amber-400/90 font-bold mb-1.5">
-          [All candidate fragments were safely discarded as incompatible]
+        <div className="text-amber-400/90 font-bold mb-1.5 p-1.5 bg-amber-950/20 border border-amber-900/30 rounded text-[9px]">
+          [All evaluated database fragments were safely discarded as incompatible. Standard prompt and archetype preset strictly applied.]
         </div>
       )}
       {currentCard.synthDebug.evaluations && currentCard.synthDebug.evaluations.length > 0 && (
         <div className="mb-2">
           <span className="text-stone-500 font-bold block mb-1">Evaluated Contributions</span>
           {currentCard.synthDebug.evaluations.map((ev, i) => (
-            <div key={i} className={ev.decision === 'included' ? 'text-green-400' : 'text-stone-600 line-through'}>
-              - [{ev.field}] "{ev.text}" ({ev.reason})
+            <div key={i} className={`text-[9px] leading-relaxed mb-1 ${ev.decision === 'included' ? 'text-green-400' : 'text-stone-600 line-through'}`}>
+              <span className="text-stone-500 font-bold">[{ev.referenceName} • {ev.field}]</span>{' '}
+              <span>"{ev.text}"</span>
+              {ev.decision === 'included' && ev.cleanedText && ev.cleanedText !== ev.text && (
+                <span className="text-amber-300 font-normal"> → Kept: "{ev.cleanedText}"</span>
+              )}
+              <span className="text-[8px] text-stone-500 ml-1">({ev.reason})</span>
             </div>
           ))}
         </div>
