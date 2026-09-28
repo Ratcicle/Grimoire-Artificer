@@ -226,8 +226,8 @@ export const isTransferableTechnique = (text: string): boolean => {
   const t = text.trim();
   if (t.length < 3) return false;
 
-  // If it mentions clothing/attire/armor/subjects/environments/materials, it's not purely transferable
-  if (/\b(?:armor|clothing|clothes|robes?|attire|dress|suit|fabric|velvet|leather|obsidian|sword|cathedral|castle|demon|dragon|warrior|knight|mage|violet|emerald|purple|portrait|bust\s*shot)\b/i.test(t)) {
+  // If it mentions clothing/attire/armor/subjects/environments/materials/scale, it's not purely transferable
+  if (/\b(?:armor|clothing|clothes|robes?|attire|dress|suit|fabric|velvet|leather|obsidian|sword|cathedral|castle|crypt|demon|dragon|warrior|knight|mage|noble|human|person|creature|beast|monster|colossal|gargantuan|towering|cities|violet|emerald|purple|portrait|bust\s*shot|blood|splatter|gore)\b/i.test(t)) {
     return false;
   }
 
@@ -328,7 +328,8 @@ export const filterFragmentForIdentity = (
  */
 export const checkSingleClauseCompatibility = (
   clauseText: string,
-  context: SynthesisContext
+  context: SynthesisContext,
+  field?: string
 ): { compatible: boolean; reason: string } => {
   const normClause = NORMALIZE(clauseText);
   if (!normClause) {
@@ -419,10 +420,12 @@ export const checkSingleClauseCompatibility = (
           }
         }
 
-        // Royal Carmine ceremonial blood exception: "blood pact", "blood contract", "blood seals"
-        if (context.archetype === Archetype.RoyalCarmine && (normTerm.includes("blood") || normTerm === "blood")) {
+        // Royal Carmine ceremonial blood exception: only applies to generic term "blood",
+        // NEVER to explicit "blood splatter", "pools of blood", "excessive blood", or "gore"!
+        if (context.archetype === Archetype.RoyalCarmine && normTerm === "blood") {
+          const hasGoreOrSplatter = /\b(?:splatter|pools?|excessive|gore|dripping|bloody)\b/i.test(clauseText);
           const isCeremonialBlood = /\bblood\s+(?:pact|contract|seals?|symbols?|ritual|oath)\b/i.test(clauseText);
-          if (isCeremonialBlood) {
+          if (isCeremonialBlood && !hasGoreOrSplatter) {
             continue;
           }
         }
@@ -435,6 +438,18 @@ export const checkSingleClauseCompatibility = (
         return {
           compatible: false,
           reason: `Conflicts with ${context.archetype} preset rule forbidding '${term}'.`
+        };
+      }
+    }
+  }
+
+  // Explicit check for Royal Carmine: blood splatter / pools of blood / gore is strictly forbidden even if "blood pact" is nearby
+  if (context.archetype === Archetype.RoyalCarmine) {
+    if (/\b(?:blood\s*splatter|pools?\s+of\s+blood|excessive\s+blood|gore|bloody\s+floor|blood\s+dripping)\b/i.test(clauseText)) {
+      if (!normSubject.includes("blood splatter") && !normSubject.includes("gore")) {
+        return {
+          compatible: false,
+          reason: "Conflicts with Royal Carmine preset forbidding blood splatter, pools of blood, and gore."
         };
       }
     }
@@ -469,22 +484,52 @@ export const checkSingleClauseCompatibility = (
     }
   }
 
-  // 6. Transferable technique fast-track
-  if (isTransferableTechnique(clauseText)) {
-    return {
-      compatible: true,
-      reason: "Pure transferable visual technique."
-    };
+  // 6. Colossal Scale imposition onto humans (MUST check before transferable fast-track)
+  if (/\b(?:colossal|gargantuan|mountain[- ]sized|towering\s+over\s+cities)\b/i.test(normClause)) {
+    const isHumanEntity = /\b(?:human|noble|mage|wizard|knight|cleric|scholar|artificer|person)\b/i.test(normSubject);
+    if (isHumanEntity && !normSubject.includes("colossal") && !normSubject.includes("gargantuan")) {
+      return {
+        compatible: false,
+        reason: "Imposes colossal/gargantuan scale onto a human entity."
+      };
+    }
   }
 
-  // 7. Conditional Content & Evidence Requirement (Garment colors, materials, dominant palette)
-  const specifiesClothingOrPalette =
-    /\b(?:clothing|clothes|garments?|robes?|attire|suit|outfit|fabric|dresses?|cloaks?|tunics?)\b/i.test(clauseText) ||
-    /\b(?:dominant\s+[a-z]+|palette\s+logic|tones?)\b/i.test(clauseText);
+  // 7. Multiple Subjects imposition
+  if (/\b(?:multiple\s+subjects?|two\s+warriors|army|group\s+of)\b/i.test(normClause)) {
+    const userAskedMultiple = /\b(?:multiple|two|pair|group|army|battle\s+between|clash)\b/i.test(normSubject);
+    if (!userAskedMultiple) {
+      return {
+        compatible: false,
+        reason: "Imposes multiple subjects onto a single-entity prompt."
+      };
+    }
+  }
 
-  if (specifiesClothingOrPalette) {
+  // 8. Dominant vs Accent Colors (e.g. Crimson in Royal Carmine vs White silk)
+  if (context.archetype === Archetype.RoyalCarmine || isWhiteSilkRequest) {
+    const isDominantCrimson =
+      /\b(?:dominant\s+crimson|crimson\s+dominant)\b/i.test(clauseText) ||
+      /\bcrimson\s+(?:clothing|clothes|garments?|robes?|attire|suit)\s+covering\s+the\s+(?:entire\s+)?figure\b/i.test(clauseText) ||
+      /\bcovering\s+the\s+entire\s+figure\s+in\s+crimson\b/i.test(clauseText) ||
+      /\bdominant\s+crimson\s+clothing\b/i.test(clauseText);
+
+    if (isDominantCrimson) {
+      return {
+        compatible: false,
+        reason: `Crimson is allowed only as an accent in ${context.archetype} and contradicts the requested white clothing.`
+      };
+    }
+  }
+
+  // 9. Conditional Content & Evidence Requirement (Palette fields, Garment colors, materials)
+  const isPaletteField = field === "paletteLogic" || field === "palette";
+  const specifiesClothing = /\b(?:clothing|clothes|garments?|robes?|attire|suit|outfit|fabric|dresses?|cloaks?|tunics?)\b/i.test(clauseText);
+  const specifiesDominantPalette = /\b(?:dominant\s+[a-z]+|palette\s+logic|tones?|hues?)\b/i.test(clauseText);
+
+  if (isPaletteField || specifiesClothing || specifiesDominantPalette) {
     // Check if colors are specified:
-    const colorMatches = clauseText.match(/\b(?:violet|emerald|purple|magenta|cyan|teal|green|yellow|orange|neon|pink|red|crimson|gold|silver|white|ivory|black|brown|grey|gray)\b/gi) || [];
+    const colorMatches = clauseText.match(/\b(?:violet|emerald(?:\s+green)?|green|purple|magenta|cyan|teal|yellow|orange|neon|pink|red|crimson|gold|silver|white|ivory|black|brown|grey|gray)\b/gi) || [];
     const colors = colorMatches.map(c => NORMALIZE(c));
 
     for (const col of colors) {
@@ -497,7 +542,9 @@ export const checkSingleClauseCompatibility = (
       if (!inPrompt && !inArchetype) {
         return {
           compatible: false,
-          reason: `Conditional clothing colors ('${clauseText}') contradict prompt and ${context.archetype} palette.`
+          reason: isPaletteField
+            ? `Palette colors ('${clauseText}') contradict prompt and ${context.archetype} palette.`
+            : `Conditional clothing colors ('${clauseText}') contradict prompt and ${context.archetype} palette.`
         };
       }
     }
@@ -519,26 +566,12 @@ export const checkSingleClauseCompatibility = (
     }
   }
 
-  // 8. Multiple Subjects imposition
-  if (/\b(?:multiple\s+subjects?|two\s+warriors|army|group\s+of)\b/i.test(normClause)) {
-    const userAskedMultiple = /\b(?:multiple|two|pair|group|army|battle\s+between|clash)\b/i.test(normSubject);
-    if (!userAskedMultiple) {
-      return {
-        compatible: false,
-        reason: "Imposes multiple subjects onto a single-entity prompt."
-      };
-    }
-  }
-
-  // 9. Colossal Scale imposition onto humans
-  if (/\b(?:colossal|gargantuan|mountain[- ]sized|towering\s+over\s+cities)\b/i.test(normClause)) {
-    const isHumanEntity = /\b(?:human|noble|mage|wizard|knight|cleric|scholar|artificer|person)\b/i.test(normSubject);
-    if (isHumanEntity && !normSubject.includes("colossal") && !normSubject.includes("gargantuan")) {
-      return {
-        compatible: false,
-        reason: "Imposes colossal/gargantuan scale onto a human entity."
-      };
-    }
+  // 10. Transferable technique check (only if all conditional checks have passed and no conflicting content exists)
+  if (isTransferableTechnique(clauseText)) {
+    return {
+      compatible: true,
+      reason: "Pure transferable visual technique."
+    };
   }
 
   return {
@@ -552,9 +585,10 @@ export const checkSingleClauseCompatibility = (
  */
 export const checkCandidateCompatibility = (
   fragmentText: string,
-  context: SynthesisContext
+  context: SynthesisContext,
+  field?: string
 ): { compatible: boolean; reason: string } => {
-  return checkSingleClauseCompatibility(fragmentText, context);
+  return checkSingleClauseCompatibility(fragmentText, context, field);
 };
 
 /**
@@ -606,7 +640,7 @@ export const evaluateCandidateFragment = (
     let lastDiscardReason = "";
 
     for (const clause of subClauses) {
-      const clauseRes = checkSingleClauseCompatibility(clause, context);
+      const clauseRes = checkSingleClauseCompatibility(clause, context, field);
       if (clauseRes.compatible) {
         acceptedClauses.push(clause);
       } else {
@@ -641,7 +675,7 @@ export const evaluateCandidateFragment = (
   }
 
   // Single clause evaluation
-  const compatResult = checkSingleClauseCompatibility(targetText, context);
+  const compatResult = checkSingleClauseCompatibility(targetText, context, field);
   if (!compatResult.compatible) {
     return {
       decision: "discarded",

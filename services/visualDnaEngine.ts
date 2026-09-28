@@ -510,7 +510,7 @@ export const synthesizeVisualDNA = (
   // Evaluate Style Anchors and Prompt Fragments
   const maxAnchors = intensity === "low" ? 2 : intensity === "medium" ? 4 : 6;
   const acceptedAnchors: string[] = [];
-  const seenAnchorTexts = new Set<string>();
+  const seenCleanAnchorTexts = new Set<string>();
 
   for (const ref of references) {
     const fragments: string[] = [];
@@ -520,22 +520,64 @@ export const synthesizeVisualDNA = (
     }
 
     for (const frag of fragments) {
-      const normFrag = normalizeText(frag);
-      if (!normFrag || seenAnchorTexts.has(normFrag)) continue;
-      seenAnchorTexts.add(normFrag);
+      if (!frag || typeof frag !== "string" || !frag.trim()) continue;
 
-      if (acceptedAnchors.length < maxAnchors) {
-        const res = evaluateAndRecord(frag, "styleAnchors", ref);
-        if (res.included && res.text) {
-          acceptedAnchors.push(res.text);
+      const evalRes = evaluateCandidateFragment(frag, "styleAnchors", ref, synthesisContext);
+      const blockedList = evalRes.blockedIdentities || (evalRes.blockedIdentity ? [evalRes.blockedIdentity] : []);
+      for (const b of blockedList) {
+        if (!debugInfo.identityBlocked.includes(b)) {
+          debugInfo.identityBlocked.push(b);
         }
-      } else {
-        // Record as discarded due to intensity limit
+      }
+
+      if (evalRes.decision === "discarded" || !evalRes.text) {
         debugInfo.evaluations!.push({
           referenceId: ref.id,
           referenceName: ref.name || "Unnamed",
           field: "styleAnchors",
-          text: frag,
+          text: evalRes.originalText || frag.trim(),
+          decision: "discarded",
+          reason: evalRes.reason
+        });
+        continue;
+      }
+
+      // Check duplicate AFTER cleaning
+      const normCleanText = normalizeText(evalRes.text);
+      if (seenCleanAnchorTexts.has(normCleanText)) {
+        debugInfo.evaluations!.push({
+          referenceId: ref.id,
+          referenceName: ref.name || "Unnamed",
+          field: "styleAnchors",
+          text: evalRes.originalText || frag.trim(),
+          cleanedText: evalRes.text !== frag.trim() ? evalRes.text : undefined,
+          decision: "discarded",
+          reason: "Duplicate style anchor after cleaning."
+        });
+        continue;
+      }
+
+      // Check limit AFTER deduplication
+      if (acceptedAnchors.length < maxAnchors) {
+        seenCleanAnchorTexts.add(normCleanText);
+        acceptedAnchors.push(evalRes.text);
+        contributingRefIds.add(ref.id);
+        debugInfo.evaluations!.push({
+          referenceId: ref.id,
+          referenceName: ref.name || "Unnamed",
+          field: "styleAnchors",
+          text: evalRes.originalText || frag.trim(),
+          cleanedText: evalRes.text !== frag.trim() ? evalRes.text : undefined,
+          decision: "included",
+          reason: evalRes.reason
+        });
+      } else {
+        debugInfo.evaluations!.push({
+          referenceId: ref.id,
+          referenceName: ref.name || "Unnamed",
+          field: "styleAnchors",
+          text: evalRes.originalText || frag.trim(),
+          cleanedText: evalRes.text !== frag.trim() ? evalRes.text : undefined,
           decision: "discarded",
           reason: "Exceeds intensity limit for style anchors."
         });
@@ -545,7 +587,7 @@ export const synthesizeVisualDNA = (
 
   // Evaluate Motifs
   const usedMotifs: string[] = [];
-  const seenMotifTexts = new Set<string>();
+  const seenCleanMotifTexts = new Set<string>();
   const maxMotifs = intensity === "low" ? 0 : intensity === "medium" ? 3 : 5;
 
   for (const ref of references) {
@@ -556,9 +598,8 @@ export const synthesizeVisualDNA = (
     }
 
     for (const motif of rawMotifs) {
+      if (!motif || typeof motif !== "string" || !motif.trim()) continue;
       const normMotif = normalizeText(motif);
-      if (!normMotif || seenMotifTexts.has(normMotif)) continue;
-      seenMotifTexts.add(normMotif);
 
       // Check if motif contains excluded words
       const words = normMotif.split(/\s+/).filter(w => w.length > 2);
@@ -595,21 +636,63 @@ export const synthesizeVisualDNA = (
         continue;
       }
 
+      const evalRes = evaluateCandidateFragment(motif, "motifs", ref, synthesisContext);
+      const blockedList = evalRes.blockedIdentities || (evalRes.blockedIdentity ? [evalRes.blockedIdentity] : []);
+      for (const b of blockedList) {
+        if (!debugInfo.identityBlocked.includes(b)) debugInfo.identityBlocked.push(b);
+      }
+
+      if (evalRes.decision === "discarded" || !evalRes.text) {
+        debugInfo.motifs.push({ motif, used: false, reason: evalRes.reason });
+        debugInfo.evaluations!.push({
+          referenceId: ref.id,
+          referenceName: ref.name || "Unnamed",
+          field: "motifs",
+          text: evalRes.originalText || motif.trim(),
+          decision: "discarded",
+          reason: evalRes.reason
+        });
+        continue;
+      }
+
+      // Check duplicate after cleaning
+      const normCleanMotif = normalizeText(evalRes.text);
+      if (seenCleanMotifTexts.has(normCleanMotif)) {
+        debugInfo.motifs.push({ motif, used: false, reason: "Duplicate motif after cleaning." });
+        debugInfo.evaluations!.push({
+          referenceId: ref.id,
+          referenceName: ref.name || "Unnamed",
+          field: "motifs",
+          text: evalRes.originalText || motif.trim(),
+          cleanedText: evalRes.text !== motif.trim() ? evalRes.text : undefined,
+          decision: "discarded",
+          reason: "Duplicate motif after cleaning."
+        });
+        continue;
+      }
+
       if (usedMotifs.length < maxMotifs) {
-        const res = evaluateAndRecord(motif, "motifs", ref);
-        if (res.included && res.text) {
-          usedMotifs.push(res.text);
-          debugInfo.motifs.push({ motif, used: true, reason: "Matches user prompt context." });
-        } else {
-          debugInfo.motifs.push({ motif, used: false, reason: "Filtered by archetype or context policy." });
-        }
+        seenCleanMotifTexts.add(normCleanMotif);
+        usedMotifs.push(evalRes.text);
+        contributingRefIds.add(ref.id);
+        debugInfo.motifs.push({ motif, used: true, reason: "Matches user prompt context." });
+        debugInfo.evaluations!.push({
+          referenceId: ref.id,
+          referenceName: ref.name || "Unnamed",
+          field: "motifs",
+          text: evalRes.originalText || motif.trim(),
+          cleanedText: evalRes.text !== motif.trim() ? evalRes.text : undefined,
+          decision: "included",
+          reason: evalRes.reason
+        });
       } else {
         debugInfo.motifs.push({ motif, used: false, reason: "Exceeds intensity limit for motifs." });
         debugInfo.evaluations!.push({
           referenceId: ref.id,
           referenceName: ref.name || "Unnamed",
           field: "motifs",
-          text: motif,
+          text: evalRes.originalText || motif.trim(),
+          cleanedText: evalRes.text !== motif.trim() ? evalRes.text : undefined,
           decision: "discarded",
           reason: "Exceeds intensity limit for motifs."
         });
