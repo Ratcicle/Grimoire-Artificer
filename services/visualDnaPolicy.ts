@@ -522,45 +522,214 @@ export const checkSingleClauseCompatibility = (
     }
   }
 
-  // 9. Conditional Content & Evidence Requirement (Palette fields, Garment colors, materials)
+  // 9. Color Role & Compatibility Evaluation (Palette fields, Garment colors, materials)
   const isPaletteField = field === "paletteLogic" || field === "palette";
-  const specifiesClothing = /\b(?:clothing|clothes|garments?|robes?|attire|suit|outfit|fabric|dresses?|cloaks?|tunics?)\b/i.test(clauseText);
+  const specifiesClothing = /\b(?:clothing|clothes|garments?|robes?|attire|suit|outfit|fabric|dresses?|cloaks?|tunics?|armor|plate)\b/i.test(clauseText);
   const specifiesDominantPalette = /\b(?:dominant\s+[a-z]+|palette\s+logic|tones?|hues?)\b/i.test(clauseText);
 
-  if (isPaletteField || specifiesClothing || specifiesDominantPalette) {
-    // Check if colors are specified:
-    const colorMatches = clauseText.match(/\b(?:violet|emerald(?:\s+green)?|green|purple|magenta|cyan|teal|yellow|orange|neon|pink|red|crimson|gold|silver|white|ivory|black|brown|grey|gray)\b/gi) || [];
-    const colors = colorMatches.map(c => NORMALIZE(c));
+  // Complete chromatic vocabulary recognition
+  const COLOR_REGEX = /\b(?:emerald\s+green|golden|gold|emerald|green|cyan|teal|navy|turquoise|blue|violet|purple|magenta|pink|brown|bronze|silver|ivory|cream|beige|amber|black|white|gray|grey|red|crimson|orange|yellow)\b/gi;
+  const colorMatches = clauseText.match(COLOR_REGEX) || [];
+  const recognizedColors = Array.from(new Set(colorMatches.map(c => NORMALIZE(c))));
 
-    for (const col of colors) {
-      // Is this color supported by prompt?
-      const inPrompt = normSubject.includes(col);
-      // Is this color supported by archetype signature or allowed clothing colors?
-      const inArchetype = archetypeRules.allowedClothingColors?.some(ac => NORMALIZE(ac).includes(col)) ||
-                          archetypeRules.signatureTerms?.some(st => NORMALIZE(st).includes(col));
+  type VisualColorRole =
+    | 'linework'
+    | 'lighting'
+    | 'shadow'
+    | 'accent'
+    | 'dominant_clothing'
+    | 'clothing'
+    | 'palette';
 
-      if (!inPrompt && !inArchetype) {
-        return {
-          compatible: false,
-          reason: isPaletteField
-            ? `Palette colors ('${clauseText}') contradict prompt and ${context.archetype} palette.`
-            : `Conditional clothing colors ('${clauseText}') contradict prompt and ${context.archetype} palette.`
-        };
+  const determineColorRole = (color: string): VisualColorRole => {
+    const escCol = escapeRegex(color);
+
+    // Dominant clothing / covering figure
+    const domClothingRegex = new RegExp(
+      `(?:^|\\s)(?:dominant\\s+${escCol}|${escCol}\\s+dominant)(?:$|\\s)|` +
+      `(?:^|\\s)${escCol}\\s+(?:clothing|clothes|garments?|robes?|attire|suit)\\s+covering\\s+the\\s+(?:entire\\s+)?figure(?:$|\\s)|` +
+      `(?:^|\\s)covering\\s+the\\s+(?:entire\\s+)?figure\\s+in\\s+${escCol}(?:$|\\s)|` +
+      `(?:^|\\s)dominant\\s+${escCol}\\s+(?:clothing|clothes|garments?|robes?|attire|suit)(?:$|\\s)`,
+      "i"
+    );
+    if (domClothingRegex.test(clauseText)) return 'dominant_clothing';
+
+    // Linework / line art / outline / contour / ink
+    const lineworkRegex = new RegExp(
+      `(?:^|\\s)${escCol}\\s+(?:linework|line\\s*art|outlines?|contours?|ink(?:\\s*strokes?)?)(?:$|\\s)|` +
+      `(?:^|\\s)(?:linework|line\\s*art|outlines?|contours?|ink)\\s+(?:in|of|with|and|on)\\s+${escCol}(?:$|\\s)|` +
+      `(?:^|\\s)on\\s+(?:white|silver|ivory)\\s+(?:ceremonial\\s+)?(?:armor|robes?)\\s+with\\s+${escCol}\\s+(?:linework|contours?)(?:$|\\s)`,
+      "i"
+    );
+    if (lineworkRegex.test(clauseText)) return 'linework';
+
+    // Lighting / glow / light / energy
+    const lightingRegex = new RegExp(
+      `(?:^|\\s)${escCol}\\s+(?:rim\\s*light(?:ing)?|lighting|light(?:s)?|glow(?:ing)?|illumination|highlights?|specular(?:\\s*highlights?)?|reflections?|aura|energy|rays?)(?:$|\\s)|` +
+      `(?:^|\\s)(?:rim\\s*light(?:ing)?|lighting|light|glow|highlights?)\\s+(?:in|of|with)\\s+${escCol}(?:$|\\s)`,
+      "i"
+    );
+    if (lightingRegex.test(clauseText)) return 'lighting';
+
+    // Shadow / shading
+    const shadowRegex = new RegExp(
+      `(?:^|\\s)${escCol}\\s+(?:shadows?|shading|falloff|depth)(?:$|\\s)|` +
+      `(?:^|\\s)(?:shadows?|shading)\\s+(?:in|of|with)\\s+${escCol}(?:$|\\s)`,
+      "i"
+    );
+    if (shadowRegex.test(clauseText)) return 'shadow';
+
+    // Accent / trim / embroidery / gemstone / detail / seals
+    const accentRegex = new RegExp(
+      `(?:^|\\s)${escCol}\\s+(?:(?:embroidered\\s+)?accents?|trim(?:s|mings?)?|embroidery|embroidered|gemstones?|gems?|jewels?|jewelry|filigree|seals?|symbols?|runes?|markings?|details?)(?:$|\\s)|` +
+      `(?:^|\\s)(?:accents?|trim(?:s)?|embroidery|gemstones?|gems?|jewels?)\\s+(?:in|of|with)\\s+${escCol}(?:$|\\s)|` +
+      `(?:^|\\s)(?:small|subtle|delicate|minor)\\s+${escCol}\\s+(?:gemstones?|gems?|jewels?|accents?|details?|seals?)(?:$|\\s)`,
+      "i"
+    );
+    if (accentRegex.test(clauseText)) return 'accent';
+
+    // Clothing / attire / armor / material
+    const clothingRegex = new RegExp(
+      `(?:^|\\s)${escCol}\\s+(?:clothing|clothes|garments?|robes?|attire|suit|outfit|fabric|silk|velvet|leather|armor|plate|cuirass|gauntlets?|pauldrons?|helmets?|dresses?|cloaks?|tunics?)(?:$|\\s)|` +
+      `(?:^|\\s)(?:silk|clothing|clothes|garments?|robes?|attire|suit|armor)\\s+(?:in|of)\\s+${escCol}(?:$|\\s)`,
+      "i"
+    );
+    if (clothingRegex.test(clauseText)) return 'clothing';
+
+    if (isPaletteField || specifiesDominantPalette) return 'palette';
+
+    return 'clothing';
+  };
+
+  if (recognizedColors.length > 0 && (isPaletteField || specifiesClothing || specifiesDominantPalette || isConditionalFeature(clauseText))) {
+    for (const col of recognizedColors) {
+      const role = determineColorRole(col);
+
+      // Linework / outlines: transferable illustration technique
+      if (role === 'linework') {
+        if (context.excludedWords?.has(col)) {
+          return {
+            compatible: false,
+            reason: `Linework color '${col}' is excluded by user.`
+          };
+        }
+        continue;
+      }
+
+      // Lighting / rim light: transferable lighting technique
+      if (role === 'lighting') {
+        if (context.excludedWords?.has(col)) {
+          return {
+            compatible: false,
+            reason: `Lighting color '${col}' is excluded by user.`
+          };
+        }
+        continue;
+      }
+
+      // Shadow / shading: transferable technique
+      if (role === 'shadow') {
+        if (context.excludedWords?.has(col)) {
+          return {
+            compatible: false,
+            reason: `Shadow color '${col}' is excluded by user.`
+          };
+        }
+        continue;
+      }
+
+      // Dominant clothing:
+      if (role === 'dominant_clothing') {
+        if (isWhiteSilkRequest || context.archetype === Archetype.RoyalCarmine) {
+          if (!["white", "snow white", "ivory", "almond", "cream", "pearl", "silver"].includes(col)) {
+            return {
+              compatible: false,
+              reason: `Dominant ${col} clothing contradicts requested white attire and ${context.archetype} palette.`
+            };
+          }
+        }
+        if (!normSubject.includes(col)) {
+          return {
+            compatible: false,
+            reason: `Dominant ${col} clothing contradicts user prompt.`
+          };
+        }
+        continue;
+      }
+
+      // Clothing / attire / armor:
+      if (role === 'clothing') {
+        if (isWhiteSilkRequest || context.archetype === Archetype.RoyalCarmine) {
+          const isWhiteAttireColor = ["white", "snow white", "ivory", "almond", "cream", "pearl", "silver"].includes(col);
+          if (!isWhiteAttireColor && !normSubject.includes(col)) {
+            return {
+              compatible: false,
+              reason: `Clothing color ('${col}') contradicts requested white attire and ${context.archetype} palette.`
+            };
+          }
+        } else {
+          const inPrompt = normSubject.includes(col);
+          const inArchetype = archetypeRules.allowedClothingColors?.some(ac => NORMALIZE(ac).includes(col)) ||
+                              archetypeRules.signatureTerms?.some(st => NORMALIZE(st).includes(col));
+          if (!inPrompt && !inArchetype) {
+            return {
+              compatible: false,
+              reason: `Clothing color ('${col}') contradicts prompt and ${context.archetype} palette.`
+            };
+          }
+        }
+        continue;
+      }
+
+      // Accent / gemstone / trim:
+      if (role === 'accent') {
+        const inPrompt = normSubject.includes(col);
+        const inArchetype =
+          (context.archetype === Archetype.RoyalCarmine && ["crimson", "ruby", "red", "gold", "golden", "silver", "ivory", "white"].includes(col)) ||
+          archetypeRules.signatureTerms?.some(st => NORMALIZE(st).includes(col)) ||
+          archetypeRules.allowedClothingColors?.some(ac => NORMALIZE(ac).includes(col));
+
+        if (!inPrompt && !inArchetype) {
+          return {
+            compatible: false,
+            reason: `Accent color ('${col}') has no evidence in user prompt or ${context.archetype} preset.`
+          };
+        }
+        continue;
+      }
+
+      // Palette (primary/dominant palette in paletteLogic or palette field):
+      if (role === 'palette') {
+        const inPrompt = normSubject.includes(col);
+        const inArchetype =
+          (context.archetype === Archetype.RoyalCarmine && ["white", "snow white", "ivory", "almond", "cream", "pearl", "silver"].includes(col)) ||
+          archetypeRules.allowedClothingColors?.some(ac => NORMALIZE(ac).includes(col) && ac !== "crimson") ||
+          archetypeRules.signatureTerms?.some(st => NORMALIZE(st).includes(col) && st !== "crimson");
+
+        if (!inPrompt && !inArchetype) {
+          return {
+            compatible: false,
+            reason: `Palette color ('${col}') contradicts prompt and ${context.archetype} palette.`
+          };
+        }
+        continue;
       }
     }
 
     // Check if materials attached to clothing have evidence (e.g. velvet in Royal Carmine)
-    if (/\b(?:velvet|leather|obsidian|iron)\b/i.test(clauseText)) {
-      const matMatches = clauseText.match(/\b(?:velvet|leather|obsidian|iron)\b/gi) || [];
-      for (const mat of matMatches) {
-        const normMat = NORMALIZE(mat);
-        const inPrompt = normSubject.includes(normMat);
-        const inArchetype = archetypeRules.allowedMaterials?.some(am => NORMALIZE(am).includes(normMat));
-        if (!inPrompt && !inArchetype) {
-          return {
-            compatible: false,
-            reason: `Conditional garment material ('${mat}') has no evidence of compatibility with prompt or ${context.archetype}.`
-          };
+    if (context.archetype !== Archetype.Generic && archetypeRules.allowedMaterials && archetypeRules.allowedMaterials.length > 0) {
+      if (/\b(?:velvet|leather|obsidian|iron)\b/i.test(clauseText)) {
+        const matMatches = clauseText.match(/\b(?:velvet|leather|obsidian|iron)\b/gi) || [];
+        for (const mat of matMatches) {
+          const normMat = NORMALIZE(mat);
+          const inPrompt = normSubject.includes(normMat);
+          const inArchetype = archetypeRules.allowedMaterials.some(am => NORMALIZE(am).includes(normMat));
+          if (!inPrompt && !inArchetype) {
+            return {
+              compatible: false,
+              reason: `Conditional garment material ('${mat}') has no evidence of compatibility with prompt or ${context.archetype}.`
+            };
+          }
         }
       }
     }

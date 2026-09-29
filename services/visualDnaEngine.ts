@@ -724,137 +724,225 @@ export const synthesizeVisualDNA = (
   }
 
   // Profiles (filtered, only for medium and high)
-  const primaryRef = references[0];
   let scaleProfileStr = "";
   let substanceProfileStr = "";
 
-  if (intensity !== "low" && primaryRef) {
-    if (primaryRef.scaleProfile && primaryRef.scaleProfile.confidence >= 0.5) {
-      const sp = primaryRef.scaleProfile;
-      const validForms: string[] = [];
-      for (const f of (sp.scaleForms || [])) {
-        const res = evaluateAndRecord(f, "scaleForms", primaryRef);
-        if (res.included && res.text) {
-          validForms.push(res.text);
+  if (intensity !== "low") {
+    const validForms: string[] = [];
+    const seenCleanForms = new Set<string>();
+    const validCues: string[] = [];
+    const seenCleanCues = new Set<string>();
+
+    for (const ref of references) {
+      if (ref.scaleProfile && ref.scaleProfile.confidence >= 0.5) {
+        const sp = ref.scaleProfile;
+        for (const f of (sp.scaleForms || [])) {
+          if (!f || typeof f !== "string" || !f.trim()) continue;
+          const evalRes = evaluateCandidateFragment(f, "scaleForms", ref, synthesisContext);
+          const blockedList = evalRes.blockedIdentities || (evalRes.blockedIdentity ? [evalRes.blockedIdentity] : []);
+          for (const b of blockedList) {
+            if (!debugInfo.identityBlocked.includes(b)) debugInfo.identityBlocked.push(b);
+          }
+          if (evalRes.decision === "included" && evalRes.text) {
+            const normClean = normalizeText(evalRes.text);
+            if (!seenCleanForms.has(normClean) && validForms.length < 2) {
+              seenCleanForms.add(normClean);
+              validForms.push(evalRes.text);
+              contributingRefIds.add(ref.id);
+              debugInfo.evaluations!.push({
+                referenceId: ref.id,
+                referenceName: ref.name || "Unnamed",
+                field: "scaleForms",
+                text: evalRes.originalText || f.trim(),
+                cleanedText: evalRes.text !== f.trim() ? evalRes.text : undefined,
+                decision: "included",
+                reason: evalRes.reason
+              });
+            }
+          }
         }
-      }
-      const validCues: string[] = [];
-      for (const c of (sp.scaleCues || [])) {
-        const res = evaluateAndRecord(c, "scaleCues", primaryRef);
-        if (res.included && res.text) {
-          validCues.push(res.text);
+        for (const c of (sp.scaleCues || [])) {
+          if (!c || typeof c !== "string" || !c.trim()) continue;
+          const evalRes = evaluateCandidateFragment(c, "scaleCues", ref, synthesisContext);
+          const blockedList = evalRes.blockedIdentities || (evalRes.blockedIdentity ? [evalRes.blockedIdentity] : []);
+          for (const b of blockedList) {
+            if (!debugInfo.identityBlocked.includes(b)) debugInfo.identityBlocked.push(b);
+          }
+          if (evalRes.decision === "included" && evalRes.text) {
+            const normClean = normalizeText(evalRes.text);
+            if (!seenCleanCues.has(normClean) && validCues.length < 2) {
+              seenCleanCues.add(normClean);
+              validCues.push(evalRes.text);
+              contributingRefIds.add(ref.id);
+              debugInfo.evaluations!.push({
+                referenceId: ref.id,
+                referenceName: ref.name || "Unnamed",
+                field: "scaleCues",
+                text: evalRes.originalText || c.trim(),
+                cleanedText: evalRes.text !== c.trim() ? evalRes.text : undefined,
+                decision: "included",
+                reason: evalRes.reason
+              });
+            }
+          }
         }
-      }
-      const forms = validForms.join(", ");
-      const cues = validCues.join(", ");
-      if (forms || cues) {
-        scaleProfileStr = `Forms: ${forms || 'standard'}. Cues: ${cues || 'proportional'}.`;
       }
     }
 
-    if (primaryRef.substanceProfile && primaryRef.substanceProfile.confidence >= 0.5) {
-      const sp = primaryRef.substanceProfile;
-      const maxMat = intensity === "medium" ? 2 : 4;
-      const validMats: string[] = [];
+    const forms = validForms.join(", ");
+    const cues = validCues.join(", ");
+    if (forms || cues) {
+      scaleProfileStr = `Forms: ${forms || 'standard'}. Cues: ${cues || 'proportional'}.`;
+    }
 
-      const rawMats = sp.materials || [];
-      for (const rawMat of rawMats) {
-        if (!rawMat || typeof rawMat !== "string" || !rawMat.trim()) continue;
-        const evalRes = evaluateCandidateFragment(rawMat, "substanceMaterials", primaryRef, synthesisContext);
-        const blockedList = evalRes.blockedIdentities || (evalRes.blockedIdentity ? [evalRes.blockedIdentity] : []);
-        for (const b of blockedList) {
-          if (!debugInfo.identityBlocked.includes(b)) debugInfo.identityBlocked.push(b);
-        }
+    // Substance Profile: materials & elements
+    const maxMat = intensity === "medium" ? 2 : 4;
+    const validMats: string[] = [];
+    const seenCleanMats = new Set<string>();
 
-        if (evalRes.decision !== "included" || !evalRes.text) {
-          debugInfo.evaluations!.push({
-            referenceId: primaryRef.id,
-            referenceName: primaryRef.name || "Unnamed",
-            field: "substanceMaterials",
-            text: rawMat.trim(),
-            decision: "discarded",
-            reason: evalRes.reason
-          });
-          continue;
-        }
+    for (const ref of references) {
+      if (ref.substanceProfile && ref.substanceProfile.confidence >= 0.5) {
+        const rawMats = ref.substanceProfile.materials || [];
+        for (const rawMat of rawMats) {
+          if (!rawMat || typeof rawMat !== "string" || !rawMat.trim()) continue;
 
-        if (validMats.length < maxMat) {
-          validMats.push(evalRes.text);
-          contributingRefIds.add(primaryRef.id);
-          debugInfo.evaluations!.push({
-            referenceId: primaryRef.id,
-            referenceName: primaryRef.name || "Unnamed",
-            field: "substanceMaterials",
-            text: rawMat.trim(),
-            cleanedText: evalRes.text !== rawMat.trim() ? evalRes.text : undefined,
-            decision: "included",
-            reason: evalRes.reason
-          });
-        } else {
-          debugInfo.evaluations!.push({
-            referenceId: primaryRef.id,
-            referenceName: primaryRef.name || "Unnamed",
-            field: "substanceMaterials",
-            text: rawMat.trim(),
-            decision: "discarded",
-            reason: "Exceeds intensity limit for substance materials."
-          });
-        }
-      }
+          const evalRes = evaluateCandidateFragment(rawMat, "substanceMaterials", ref, synthesisContext);
+          const blockedList = evalRes.blockedIdentities || (evalRes.blockedIdentity ? [evalRes.blockedIdentity] : []);
+          for (const b of blockedList) {
+            if (!debugInfo.identityBlocked.includes(b)) debugInfo.identityBlocked.push(b);
+          }
 
-      const validElements: string[] = [];
-      const rawElements = sp.elements || [];
-      const maxElements = 2;
-      for (const rawEl of rawElements) {
-        if (!rawEl || typeof rawEl !== "string" || !rawEl.trim()) continue;
-        const evalRes = evaluateCandidateFragment(rawEl, "substanceElements", primaryRef, synthesisContext);
-        const blockedList = evalRes.blockedIdentities || (evalRes.blockedIdentity ? [evalRes.blockedIdentity] : []);
-        for (const b of blockedList) {
-          if (!debugInfo.identityBlocked.includes(b)) debugInfo.identityBlocked.push(b);
-        }
+          if (evalRes.decision !== "included" || !evalRes.text) {
+            debugInfo.evaluations!.push({
+              referenceId: ref.id,
+              referenceName: ref.name || "Unnamed",
+              field: "substanceMaterials",
+              text: evalRes.originalText || rawMat.trim(),
+              decision: "discarded",
+              reason: evalRes.reason
+            });
+            continue;
+          }
 
-        if (evalRes.decision !== "included" || !evalRes.text) {
-          debugInfo.evaluations!.push({
-            referenceId: primaryRef.id,
-            referenceName: primaryRef.name || "Unnamed",
-            field: "substanceElements",
-            text: rawEl.trim(),
-            decision: "discarded",
-            reason: evalRes.reason
-          });
-          continue;
-        }
+          // Check duplicate AFTER cleaning
+          const normCleanMat = normalizeText(evalRes.text);
+          if (seenCleanMats.has(normCleanMat)) {
+            debugInfo.evaluations!.push({
+              referenceId: ref.id,
+              referenceName: ref.name || "Unnamed",
+              field: "substanceMaterials",
+              text: evalRes.originalText || rawMat.trim(),
+              cleanedText: evalRes.text !== rawMat.trim() ? evalRes.text : undefined,
+              decision: "discarded",
+              reason: "Duplicate substance material after cleaning."
+            });
+            continue;
+          }
 
-        if (validElements.length < maxElements) {
-          validElements.push(evalRes.text);
-          contributingRefIds.add(primaryRef.id);
-          debugInfo.evaluations!.push({
-            referenceId: primaryRef.id,
-            referenceName: primaryRef.name || "Unnamed",
-            field: "substanceElements",
-            text: rawEl.trim(),
-            cleanedText: evalRes.text !== rawEl.trim() ? evalRes.text : undefined,
-            decision: "included",
-            reason: evalRes.reason
-          });
-        } else {
-          debugInfo.evaluations!.push({
-            referenceId: primaryRef.id,
-            referenceName: primaryRef.name || "Unnamed",
-            field: "substanceElements",
-            text: rawEl.trim(),
-            decision: "discarded",
-            reason: "Exceeds limit for substance elements."
-          });
+          if (validMats.length < maxMat) {
+            seenCleanMats.add(normCleanMat);
+            validMats.push(evalRes.text);
+            contributingRefIds.add(ref.id);
+            debugInfo.evaluations!.push({
+              referenceId: ref.id,
+              referenceName: ref.name || "Unnamed",
+              field: "substanceMaterials",
+              text: evalRes.originalText || rawMat.trim(),
+              cleanedText: evalRes.text !== rawMat.trim() ? evalRes.text : undefined,
+              decision: "included",
+              reason: evalRes.reason
+            });
+          } else {
+            debugInfo.evaluations!.push({
+              referenceId: ref.id,
+              referenceName: ref.name || "Unnamed",
+              field: "substanceMaterials",
+              text: evalRes.originalText || rawMat.trim(),
+              cleanedText: evalRes.text !== rawMat.trim() ? evalRes.text : undefined,
+              decision: "discarded",
+              reason: "Exceeds intensity limit for substance materials."
+            });
+          }
         }
       }
+    }
 
-      if (validMats.length > 0 || validElements.length > 0) {
-        substanceProfileStr = [
-          validMats.length > 0 ? `Materials: ${validMats.join(", ")}` : "",
-          validElements.length > 0 ? `Elements: ${validElements.join(", ")}` : ""
-        ].filter(Boolean).join(". ") + ".";
+    const validElements: string[] = [];
+    const seenCleanElements = new Set<string>();
+    const maxElements = 2;
+
+    for (const ref of references) {
+      if (ref.substanceProfile && ref.substanceProfile.confidence >= 0.5) {
+        const rawElements = ref.substanceProfile.elements || [];
+        for (const rawEl of rawElements) {
+          if (!rawEl || typeof rawEl !== "string" || !rawEl.trim()) continue;
+
+          const evalRes = evaluateCandidateFragment(rawEl, "substanceElements", ref, synthesisContext);
+          const blockedList = evalRes.blockedIdentities || (evalRes.blockedIdentity ? [evalRes.blockedIdentity] : []);
+          for (const b of blockedList) {
+            if (!debugInfo.identityBlocked.includes(b)) debugInfo.identityBlocked.push(b);
+          }
+
+          if (evalRes.decision !== "included" || !evalRes.text) {
+            debugInfo.evaluations!.push({
+              referenceId: ref.id,
+              referenceName: ref.name || "Unnamed",
+              field: "substanceElements",
+              text: evalRes.originalText || rawEl.trim(),
+              decision: "discarded",
+              reason: evalRes.reason
+            });
+            continue;
+          }
+
+          // Check duplicate AFTER cleaning
+          const normCleanElement = normalizeText(evalRes.text);
+          if (seenCleanElements.has(normCleanElement)) {
+            debugInfo.evaluations!.push({
+              referenceId: ref.id,
+              referenceName: ref.name || "Unnamed",
+              field: "substanceElements",
+              text: evalRes.originalText || rawEl.trim(),
+              cleanedText: evalRes.text !== rawEl.trim() ? evalRes.text : undefined,
+              decision: "discarded",
+              reason: "Duplicate substance element after cleaning."
+            });
+            continue;
+          }
+
+          if (validElements.length < maxElements) {
+            seenCleanElements.add(normCleanElement);
+            validElements.push(evalRes.text);
+            contributingRefIds.add(ref.id);
+            debugInfo.evaluations!.push({
+              referenceId: ref.id,
+              referenceName: ref.name || "Unnamed",
+              field: "substanceElements",
+              text: evalRes.originalText || rawEl.trim(),
+              cleanedText: evalRes.text !== rawEl.trim() ? evalRes.text : undefined,
+              decision: "included",
+              reason: evalRes.reason
+            });
+          } else {
+            debugInfo.evaluations!.push({
+              referenceId: ref.id,
+              referenceName: ref.name || "Unnamed",
+              field: "substanceElements",
+              text: evalRes.originalText || rawEl.trim(),
+              cleanedText: evalRes.text !== rawEl.trim() ? evalRes.text : undefined,
+              decision: "discarded",
+              reason: "Exceeds limit for substance elements."
+            });
+          }
+        }
       }
+    }
+
+    if (validMats.length > 0 || validElements.length > 0) {
+      substanceProfileStr = [
+        validMats.length > 0 ? `Materials: ${validMats.join(", ")}` : "",
+        validElements.length > 0 ? `Elements: ${validElements.join(", ")}` : ""
+      ].filter(Boolean).join(". ") + ".";
     }
   }
 
