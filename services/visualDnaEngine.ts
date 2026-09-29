@@ -724,75 +724,75 @@ export const synthesizeVisualDNA = (
   }
 
   // Profiles (filtered, only for medium and high)
+  const primaryRef = references[0];
   let scaleProfileStr = "";
   let substanceProfileStr = "";
 
   if (intensity !== "low") {
-    const validForms: string[] = [];
-    const seenCleanForms = new Set<string>();
-    const validCues: string[] = [];
-    const seenCleanCues = new Set<string>();
+    // scaleProfile: uses only primary reference to avoid anatomical semantic contamination
+    if (primaryRef && primaryRef.scaleProfile && primaryRef.scaleProfile.confidence >= 0.5) {
+      const sp = primaryRef.scaleProfile;
+      const validForms: string[] = [];
+      const seenCleanForms = new Set<string>();
+      const validCues: string[] = [];
+      const seenCleanCues = new Set<string>();
 
-    for (const ref of references) {
-      if (ref.scaleProfile && ref.scaleProfile.confidence >= 0.5) {
-        const sp = ref.scaleProfile;
-        for (const f of (sp.scaleForms || [])) {
-          if (!f || typeof f !== "string" || !f.trim()) continue;
-          const evalRes = evaluateCandidateFragment(f, "scaleForms", ref, synthesisContext);
-          const blockedList = evalRes.blockedIdentities || (evalRes.blockedIdentity ? [evalRes.blockedIdentity] : []);
-          for (const b of blockedList) {
-            if (!debugInfo.identityBlocked.includes(b)) debugInfo.identityBlocked.push(b);
-          }
-          if (evalRes.decision === "included" && evalRes.text) {
-            const normClean = normalizeText(evalRes.text);
-            if (!seenCleanForms.has(normClean) && validForms.length < 2) {
-              seenCleanForms.add(normClean);
-              validForms.push(evalRes.text);
-              contributingRefIds.add(ref.id);
-              debugInfo.evaluations!.push({
-                referenceId: ref.id,
-                referenceName: ref.name || "Unnamed",
-                field: "scaleForms",
-                text: evalRes.originalText || f.trim(),
-                cleanedText: evalRes.text !== f.trim() ? evalRes.text : undefined,
-                decision: "included",
-                reason: evalRes.reason
-              });
-            }
-          }
+      for (const f of (sp.scaleForms || [])) {
+        if (!f || typeof f !== "string" || !f.trim()) continue;
+        const evalRes = evaluateCandidateFragment(f, "scaleForms", primaryRef, synthesisContext);
+        const blockedList = evalRes.blockedIdentities || (evalRes.blockedIdentity ? [evalRes.blockedIdentity] : []);
+        for (const b of blockedList) {
+          if (!debugInfo.identityBlocked.includes(b)) debugInfo.identityBlocked.push(b);
         }
-        for (const c of (sp.scaleCues || [])) {
-          if (!c || typeof c !== "string" || !c.trim()) continue;
-          const evalRes = evaluateCandidateFragment(c, "scaleCues", ref, synthesisContext);
-          const blockedList = evalRes.blockedIdentities || (evalRes.blockedIdentity ? [evalRes.blockedIdentity] : []);
-          for (const b of blockedList) {
-            if (!debugInfo.identityBlocked.includes(b)) debugInfo.identityBlocked.push(b);
-          }
-          if (evalRes.decision === "included" && evalRes.text) {
-            const normClean = normalizeText(evalRes.text);
-            if (!seenCleanCues.has(normClean) && validCues.length < 2) {
-              seenCleanCues.add(normClean);
-              validCues.push(evalRes.text);
-              contributingRefIds.add(ref.id);
-              debugInfo.evaluations!.push({
-                referenceId: ref.id,
-                referenceName: ref.name || "Unnamed",
-                field: "scaleCues",
-                text: evalRes.originalText || c.trim(),
-                cleanedText: evalRes.text !== c.trim() ? evalRes.text : undefined,
-                decision: "included",
-                reason: evalRes.reason
-              });
-            }
+        if (evalRes.decision === "included" && evalRes.text) {
+          const normClean = normalizeText(evalRes.text);
+          if (!seenCleanForms.has(normClean) && validForms.length < 2) {
+            seenCleanForms.add(normClean);
+            validForms.push(evalRes.text);
+            contributingRefIds.add(primaryRef.id);
+            debugInfo.evaluations!.push({
+              referenceId: primaryRef.id,
+              referenceName: primaryRef.name || "Unnamed",
+              field: "scaleForms",
+              text: evalRes.originalText || f.trim(),
+              cleanedText: evalRes.text !== f.trim() ? evalRes.text : undefined,
+              decision: "included",
+              reason: evalRes.reason
+            });
           }
         }
       }
-    }
+      for (const c of (sp.scaleCues || [])) {
+        if (!c || typeof c !== "string" || !c.trim()) continue;
+        const evalRes = evaluateCandidateFragment(c, "scaleCues", primaryRef, synthesisContext);
+        const blockedList = evalRes.blockedIdentities || (evalRes.blockedIdentity ? [evalRes.blockedIdentity] : []);
+        for (const b of blockedList) {
+          if (!debugInfo.identityBlocked.includes(b)) debugInfo.identityBlocked.push(b);
+        }
+        if (evalRes.decision === "included" && evalRes.text) {
+          const normClean = normalizeText(evalRes.text);
+          if (!seenCleanCues.has(normClean) && validCues.length < 2) {
+            seenCleanCues.add(normClean);
+            validCues.push(evalRes.text);
+            contributingRefIds.add(primaryRef.id);
+            debugInfo.evaluations!.push({
+              referenceId: primaryRef.id,
+              referenceName: primaryRef.name || "Unnamed",
+              field: "scaleCues",
+              text: evalRes.originalText || c.trim(),
+              cleanedText: evalRes.text !== c.trim() ? evalRes.text : undefined,
+              decision: "included",
+              reason: evalRes.reason
+            });
+          }
+        }
+      }
 
-    const forms = validForms.join(", ");
-    const cues = validCues.join(", ");
-    if (forms || cues) {
-      scaleProfileStr = `Forms: ${forms || 'standard'}. Cues: ${cues || 'proportional'}.`;
+      const forms = validForms.join(", ");
+      const cues = validCues.join(", ");
+      if (forms || cues) {
+        scaleProfileStr = `Forms: ${forms || 'standard'}. Cues: ${cues || 'proportional'}.`;
+      }
     }
 
     // Substance Profile: materials & elements

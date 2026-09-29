@@ -529,8 +529,22 @@ export const checkSingleClauseCompatibility = (
 
   // Complete chromatic vocabulary recognition
   const COLOR_REGEX = /\b(?:emerald\s+green|golden|gold|emerald|green|cyan|teal|navy|turquoise|blue|violet|purple|magenta|pink|brown|bronze|silver|ivory|cream|beige|amber|black|white|gray|grey|red|crimson|orange|yellow)\b/gi;
-  const colorMatches = clauseText.match(COLOR_REGEX) || [];
-  const recognizedColors = Array.from(new Set(colorMatches.map(c => NORMALIZE(c))));
+
+  interface ColorOccurrence {
+    color: string;
+    index: number;
+    length: number;
+  }
+
+  const occurrences: ColorOccurrence[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = COLOR_REGEX.exec(clauseText)) !== null) {
+    occurrences.push({
+      color: NORMALIZE(m[0]),
+      index: m.index,
+      length: m[0].length
+    });
+  }
 
   type VisualColorRole =
     | 'linework'
@@ -541,69 +555,84 @@ export const checkSingleClauseCompatibility = (
     | 'clothing'
     | 'palette';
 
-  const determineColorRole = (color: string): VisualColorRole => {
-    const escCol = escapeRegex(color);
+  const determineRoleForOccurrence = (
+    color: string,
+    textBefore: string,
+    textAfter: string
+  ): VisualColorRole => {
+    // 1. Linework / line art / contour / ink
+    if (
+      /^\s*(?:linework|line\s*art|outlines?|contours?|ink(?:\s*strokes?)?)\b/i.test(textAfter) ||
+      /\b(?:linework|line\s*art|outlines?|contours?|ink)\s+(?:in|of|with)\s*$/i.test(textBefore)
+    ) {
+      return 'linework';
+    }
 
-    // Dominant clothing / covering figure
-    const domClothingRegex = new RegExp(
-      `(?:^|\\s)(?:dominant\\s+${escCol}|${escCol}\\s+dominant)(?:$|\\s)|` +
-      `(?:^|\\s)${escCol}\\s+(?:clothing|clothes|garments?|robes?|attire|suit)\\s+covering\\s+the\\s+(?:entire\\s+)?figure(?:$|\\s)|` +
-      `(?:^|\\s)covering\\s+the\\s+(?:entire\\s+)?figure\\s+in\\s+${escCol}(?:$|\\s)|` +
-      `(?:^|\\s)dominant\\s+${escCol}\\s+(?:clothing|clothes|garments?|robes?|attire|suit)(?:$|\\s)`,
-      "i"
-    );
-    if (domClothingRegex.test(clauseText)) return 'dominant_clothing';
+    // 2. Lighting / glow / light / energy
+    if (
+      /^\s*(?:rim\s*light(?:ing)?|lighting|light(?:s)?|glow(?:ing)?|illumination|highlights?|specular(?:\s*highlights?)?|reflections?|aura|energy|rays?)\b/i.test(textAfter) ||
+      /\b(?:rim\s*light(?:ing)?|lighting|light|glow|highlights?)\s+(?:in|of|with)\s*$/i.test(textBefore)
+    ) {
+      return 'lighting';
+    }
 
-    // Linework / line art / outline / contour / ink
-    const lineworkRegex = new RegExp(
-      `(?:^|\\s)${escCol}\\s+(?:linework|line\\s*art|outlines?|contours?|ink(?:\\s*strokes?)?)(?:$|\\s)|` +
-      `(?:^|\\s)(?:linework|line\\s*art|outlines?|contours?|ink)\\s+(?:in|of|with|and|on)\\s+${escCol}(?:$|\\s)|` +
-      `(?:^|\\s)on\\s+(?:white|silver|ivory)\\s+(?:ceremonial\\s+)?(?:armor|robes?)\\s+with\\s+${escCol}\\s+(?:linework|contours?)(?:$|\\s)`,
-      "i"
-    );
-    if (lineworkRegex.test(clauseText)) return 'linework';
+    // 3. Shadow / shading
+    if (
+      /^\s*(?:shadows?|shading|falloff|depth)\b/i.test(textAfter) ||
+      /\b(?:shadows?|shading)\s+(?:in|of|with)\s*$/i.test(textBefore)
+    ) {
+      return 'shadow';
+    }
 
-    // Lighting / glow / light / energy
-    const lightingRegex = new RegExp(
-      `(?:^|\\s)${escCol}\\s+(?:rim\\s*light(?:ing)?|lighting|light(?:s)?|glow(?:ing)?|illumination|highlights?|specular(?:\\s*highlights?)?|reflections?|aura|energy|rays?)(?:$|\\s)|` +
-      `(?:^|\\s)(?:rim\\s*light(?:ing)?|lighting|light|glow|highlights?)\\s+(?:in|of|with)\\s+${escCol}(?:$|\\s)`,
-      "i"
-    );
-    if (lightingRegex.test(clauseText)) return 'lighting';
+    // 4. Accent / trim / embroidery / gemstone / detail / seals
+    if (
+      /^\s*(?:(?:embroidered\s+)?accents?|trim(?:s|mings?)?|embroidery|embroidered|gemstones?|gems?|jewels?|jewelry|filigree|seals?|symbols?|runes?|markings?|details?)\b/i.test(textAfter) ||
+      /\b(?:accents?|trim(?:s)?|embroidery|gemstones?|gems?|jewels?)\s+(?:in|of|with)\s*$/i.test(textBefore) ||
+      (/\b(?:small|subtle|delicate|minor)\s*$/i.test(textBefore) && /^\s*(?:gemstones?|gems?|jewels?|accents?|details?|seals?)\b/i.test(textAfter))
+    ) {
+      return 'accent';
+    }
 
-    // Shadow / shading
-    const shadowRegex = new RegExp(
-      `(?:^|\\s)${escCol}\\s+(?:shadows?|shading|falloff|depth)(?:$|\\s)|` +
-      `(?:^|\\s)(?:shadows?|shading)\\s+(?:in|of|with)\\s+${escCol}(?:$|\\s)`,
-      "i"
-    );
-    if (shadowRegex.test(clauseText)) return 'shadow';
+    // 5. Dominant clothing: "dominant" must modify clothing / attire / armor / figure
+    const isPrecededByDominant = /\bdominant\s*$/i.test(textBefore);
+    const isFollowedByClothing =
+      /^\s*(?:clothing|clothes|garments?|robes?|attire|suit|outfit|fabric|silk|velvet|leather|armor|plate|cuirass|gauntlets?|pauldrons?|helmets?|dresses?|cloaks?|tunics?)\b/i.test(textAfter) ||
+      /^\s+[a-z]+\s+(?:clothing|clothes|garments?|robes?|attire|suit|outfit|fabric|silk|velvet|leather|armor|plate)\b/i.test(textAfter);
 
-    // Accent / trim / embroidery / gemstone / detail / seals
-    const accentRegex = new RegExp(
-      `(?:^|\\s)${escCol}\\s+(?:(?:embroidered\\s+)?accents?|trim(?:s|mings?)?|embroidery|embroidered|gemstones?|gems?|jewels?|jewelry|filigree|seals?|symbols?|runes?|markings?|details?)(?:$|\\s)|` +
-      `(?:^|\\s)(?:accents?|trim(?:s)?|embroidery|gemstones?|gems?|jewels?)\\s+(?:in|of|with)\\s+${escCol}(?:$|\\s)|` +
-      `(?:^|\\s)(?:small|subtle|delicate|minor)\\s+${escCol}\\s+(?:gemstones?|gems?|jewels?|accents?|details?|seals?)(?:$|\\s)`,
-      "i"
-    );
-    if (accentRegex.test(clauseText)) return 'accent';
+    const isCoveringFigure =
+      /covering\s+the\s+(?:entire\s+)?figure\b/i.test(textAfter) ||
+      /\bcovering\s+the\s+(?:entire\s+)?figure\s+in\s*$/i.test(textBefore);
 
-    // Clothing / attire / armor / material
-    const clothingRegex = new RegExp(
-      `(?:^|\\s)${escCol}\\s+(?:clothing|clothes|garments?|robes?|attire|suit|outfit|fabric|silk|velvet|leather|armor|plate|cuirass|gauntlets?|pauldrons?|helmets?|dresses?|cloaks?|tunics?)(?:$|\\s)|` +
-      `(?:^|\\s)(?:silk|clothing|clothes|garments?|robes?|attire|suit|armor)\\s+(?:in|of)\\s+${escCol}(?:$|\\s)`,
-      "i"
-    );
-    if (clothingRegex.test(clauseText)) return 'clothing';
+    if (
+      (isPrecededByDominant && isFollowedByClothing) ||
+      isCoveringFigure ||
+      /^\s+(?:clothing|clothes|garments?|robes?|attire|suit)\s+dominant\b/i.test(textAfter)
+    ) {
+      return 'dominant_clothing';
+    }
 
-    if (isPaletteField || specifiesDominantPalette) return 'palette';
+    // 6. Clothing / attire / armor / material
+    if (
+      isFollowedByClothing ||
+      /\b(?:silk|clothing|clothes|garments?|robes?|attire|suit|armor)\s+(?:in|of)\s*$/i.test(textBefore)
+    ) {
+      return 'clothing';
+    }
+
+    // 7. Palette field or dominant palette specification
+    if (isPaletteField || specifiesDominantPalette || isPrecededByDominant) {
+      return 'palette';
+    }
 
     return 'clothing';
   };
 
-  if (recognizedColors.length > 0 && (isPaletteField || specifiesClothing || specifiesDominantPalette || isConditionalFeature(clauseText))) {
-    for (const col of recognizedColors) {
-      const role = determineColorRole(col);
+  if (occurrences.length > 0 && (isPaletteField || specifiesClothing || specifiesDominantPalette || isConditionalFeature(clauseText))) {
+    for (const occ of occurrences) {
+      const col = occ.color;
+      const textBefore = clauseText.slice(0, occ.index);
+      const textAfter = clauseText.slice(occ.index + occ.length);
+      const role = determineRoleForOccurrence(col, textBefore, textAfter);
 
       // Linework / outlines: transferable illustration technique
       if (role === 'linework') {
@@ -647,12 +676,16 @@ export const checkSingleClauseCompatibility = (
               reason: `Dominant ${col} clothing contradicts requested white attire and ${context.archetype} palette.`
             };
           }
-        }
-        if (!normSubject.includes(col)) {
-          return {
-            compatible: false,
-            reason: `Dominant ${col} clothing contradicts user prompt.`
-          };
+        } else {
+          const inPrompt = normSubject.includes(col);
+          const inArchetype = archetypeRules.allowedClothingColors?.some(ac => NORMALIZE(ac).includes(col)) ||
+                              archetypeRules.signatureTerms?.some(st => NORMALIZE(st).includes(col));
+          if (!inPrompt && !inArchetype) {
+            return {
+              compatible: false,
+              reason: `Dominant ${col} clothing contradicts user prompt and ${context.archetype} preset.`
+            };
+          }
         }
         continue;
       }

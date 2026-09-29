@@ -216,6 +216,88 @@ describe("GRIMOIRE ARTIFICER — FECHAMENTO DA RODADA 2", () => {
 
       expect(res.promptBlock).toContain("small blue gemstone accent");
     });
+
+    it("A. Royal Carmine: 'blue linework on blue robes' é rejeitado porque blue robes é roupa azul incompatível", () => {
+      const ref = makeBaseDna("rc-blue-line-blue-robes", "Blue Line Blue Robes Ref", {
+        stylePromptFragments: ["blue linework on blue robes"]
+      });
+
+      const res = synthesizeVisualDNA({
+        references: [ref],
+        intensity: "medium",
+        subject: "A royal noble wearing white silk",
+        cardType: CardType.Monster,
+        archetype: Archetype.RoyalCarmine
+      });
+
+      // blue em robes não pode entrar como roupa no Royal Carmine
+      expect(res.promptBlock).not.toContain("blue robes");
+      expect(res.promptBlock).not.toContain("blue linework on blue robes");
+      const evalItem = res.debugInfo?.evaluations?.find(e => e.text.includes("blue linework on blue robes"));
+      expect(evalItem?.decision).toBe("discarded");
+    });
+
+    it("B. Royal Carmine: 'dominant golden rim lighting over white silk' é preservado (golden modifica rim lighting, não roupa)", () => {
+      const ref = makeBaseDna("rc-dom-gold-light", "Dominant Golden Light Ref", {
+        stylePromptFragments: ["dominant golden rim lighting over white silk"]
+      });
+
+      const res = synthesizeVisualDNA({
+        references: [ref],
+        intensity: "medium",
+        subject: "A royal noble wearing white silk",
+        cardType: CardType.Monster,
+        archetype: Archetype.RoyalCarmine
+      });
+
+      expect(res.promptBlock).toContain("dominant golden rim lighting over white silk");
+      const evalItem = res.debugInfo?.evaluations?.find(e => e.text.includes("dominant golden rim lighting"));
+      expect(evalItem?.decision).toBe("included");
+    });
+
+    it("C. Shadow-Heart: 'dominant black clothing' é permitido pois black é cor compatível no arquétipo", () => {
+      const ref = makeBaseDna("sh-dom-black", "Shadow Dominant Black Ref", {
+        stylePromptFragments: ["dominant black clothing"]
+      });
+
+      const res = synthesizeVisualDNA({
+        references: [ref],
+        intensity: "medium",
+        subject: "A cursed knight",
+        cardType: CardType.Monster,
+        archetype: Archetype.ShadowHeart
+      });
+
+      expect(res.promptBlock).toContain("dominant black clothing");
+      const evalItem = res.debugInfo?.evaluations?.find(e => e.text.includes("dominant black clothing"));
+      expect(evalItem?.decision).toBe("included");
+    });
+
+    it("Contraprovas: 'black clothing with white linework' continua bloqueado e 'white silk with black linework' continua permitido", () => {
+      const refBlocked = makeBaseDna("rc-blocked", "Blocked Ref", {
+        stylePromptFragments: ["black clothing with white linework"]
+      });
+      const resBlocked = synthesizeVisualDNA({
+        references: [refBlocked],
+        intensity: "medium",
+        subject: "A royal noble wearing white silk",
+        cardType: CardType.Monster,
+        archetype: Archetype.RoyalCarmine
+      });
+      expect(resBlocked.promptBlock).not.toContain("black clothing");
+
+      const refAllowed = makeBaseDna("rc-allowed", "Allowed Ref", {
+        paletteLogic: "white silk with black linework"
+      });
+      const resAllowed = synthesizeVisualDNA({
+        references: [refAllowed],
+        intensity: "medium",
+        subject: "A royal noble wearing white silk",
+        cardType: CardType.Monster,
+        archetype: Archetype.RoyalCarmine
+      });
+      expect(resAllowed.promptBlock).toContain("white silk with black linework");
+    });
   });
 
   // ==========================================
@@ -356,6 +438,57 @@ describe("GRIMOIRE ARTIFICER — FECHAMENTO DA RODADA 2", () => {
       });
 
       expect(originalRef).toEqual(cloneBefore);
+    });
+
+    it("Restaurar scaleProfile: referência secundária não contribui scaleForms/scaleCues, primária contribui limpa", () => {
+      const refA = makeBaseDna("scale-ref-a", "Scale Ref A (Primary)", {
+        identitySpecificDetails: ["Sigil Omega"],
+        scaleProfile: {
+          physicalScale: "standard",
+          scaleForms: ["Sigil Omega, human scale"],
+          scaleCues: ["proportional hands"],
+          perceivedPresence: "standard",
+          evidence: "",
+          confidence: 0.9
+        }
+      });
+
+      const refB = makeBaseDna("scale-ref-b", "Scale Ref B (Secondary)", {
+        scaleProfile: {
+          physicalScale: "large",
+          scaleForms: ["serpentine elongated body"],
+          scaleCues: ["massive coils"],
+          perceivedPresence: "imposing",
+          evidence: "",
+          confidence: 0.9
+        }
+      });
+
+      const res = synthesizeVisualDNA({
+        references: [refA, refB],
+        intensity: "medium",
+        subject: "A royal noble wearing white silk",
+        cardType: CardType.Monster,
+        archetype: Archetype.RoyalCarmine
+      });
+
+      // Ref A contribui human scale
+      expect(res.promptBlock).toContain("Forms: human scale");
+      expect(res.promptBlock).toContain("Cues: proportional hands");
+
+      // Ref B NÃO deve injetar anatomia serpentina nem massive coils
+      expect(res.promptBlock).not.toContain("serpentine elongated body");
+      expect(res.promptBlock).not.toContain("massive coils");
+
+      // Identidade removida da Ref A não reaparece
+      expect(res.promptBlock).not.toContain("Sigil Omega");
+      expect(res.debugInfo?.identityBlocked).toContain("Sigil Omega");
+
+      // Diagnóstico: Ref B não deve ter avaliações de scaleForms/scaleCues aceitas
+      const refBScaleEvals = (res.debugInfo?.evaluations || []).filter(
+        e => e.referenceId === "scale-ref-b" && (e.field === "scaleForms" || e.field === "scaleCues")
+      );
+      expect(refBScaleEvals.length).toBe(0);
     });
   });
 
