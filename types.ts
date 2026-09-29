@@ -227,17 +227,23 @@ export interface VisualDNA {
 
   tags: string[];
   scores: {
-    style: number;
-    palette: number;
-    pose: number;
-    composition: number;
-    lighting: number;
-    effects: number;
-    materials: number;
-    background: number;
-    details: number;
-    silhouette: number;
-    rendering: number;
+    style?: number;
+    palette?: number;
+    pose?: number;
+    composition?: number;
+    lighting?: number;
+    effects?: number;
+    materials?: number;
+    background?: number;
+    details?: number;
+    silhouette?: number;
+    rendering?: number;
     detailDensity?: number;
   };
+  scoreJustifications?: Partial<Record<string, string>>;
+  calibrationVersion?: number;
+  isCalibrated?: boolean;
 }
+
+export type VisualDNAScores = VisualDNA['scores'];
+

@@ -1087,6 +1087,15 @@ const ArtstyleDatabase: React.FC<ArtstyleDatabaseProps> = ({ onBackToGrimoire })
                         Legacy Engine
                       </span>
                     )}
+                    {selectedDna.isCalibrated ? (
+                      <span className="px-1.5 py-0.5 bg-emerald-950/80 text-emerald-400 border border-emerald-800/40 text-[8px] font-bold font-mono uppercase rounded tracking-wider" title="Utility Matrix calibrada sob contrato V3">
+                        Calibrado (V3)
+                      </span>
+                    ) : (
+                      <span className="px-1.5 py-0.5 bg-stone-950 text-stone-500 border border-stone-850 text-[8px] font-bold font-mono uppercase rounded tracking-wider" title="Avaliação anterior sem contrato de calibração">
+                        Scores Legados
+                      </span>
+                    )}
                   </div>
                 )}
                 <p className="text-[11px] text-stone-400 italic mt-1 font-medium">"{selectedDna.summary}"</p>
@@ -1385,21 +1394,82 @@ const ArtstyleDatabase: React.FC<ArtstyleDatabaseProps> = ({ onBackToGrimoire })
 
               {/* Radar/Bar Utility Scores */}
               <div>
-                <label className="text-[10px] font-bold text-stone-500 uppercase tracking-widest flex items-center gap-1.5 mb-3">
-                  <BarChart3 size={12} /> Utility Matrix
-                </label>
-                <div className="bg-stone-950/40 rounded-xl border border-stone-800 p-4 space-y-2.5">
-                  {Object.entries(selectedDna.scores || {}).map(([key, score]) => (
-                    <div key={key} className="space-y-1">
-                      <div className="flex justify-between text-[9px] uppercase tracking-wider font-bold">
-                        <span className="text-stone-400">{key === 'rendering' ? 'renderização' : key === 'palette' ? 'paleta' : key === 'details' ? 'detalhes' : key === 'effects' ? 'efeitos' : key === 'materials' ? 'materiais' : key === 'lighting' ? 'iluminação' : key === 'composition' ? 'composição' : key}</span>
-                        <span className="text-amber-500">{((score as number) * 100).toFixed(0)}%</span>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="text-[10px] font-bold text-stone-500 uppercase tracking-widest flex items-center gap-1.5">
+                    <BarChart3 size={12} /> Utility Matrix
+                  </label>
+                  {selectedDna.isCalibrated ? (
+                    <span className="text-[8px] font-mono font-bold text-emerald-400 uppercase tracking-wider bg-emerald-950/50 px-1.5 py-0.5 rounded border border-emerald-900/30">
+                      Calibrado
+                    </span>
+                  ) : (
+                    <span className="text-[8px] font-mono font-bold text-stone-500 uppercase tracking-wider bg-stone-900 px-1.5 py-0.5 rounded border border-stone-800" title="Valores legados sem calibração">
+                      Legado
+                    </span>
+                  )}
+                </div>
+                <p className="text-[9px] text-stone-500 mb-3 leading-relaxed">
+                  Evidência visual e orientação técnica reutilizável por dimensão (0-100%). Não representa beleza da imagem ou relevância temática.
+                </p>
+                <div className="bg-stone-950/40 rounded-xl border border-stone-800 p-4 space-y-3">
+                  {Object.entries(selectedDna.scores || {}).map(([key, score]) => {
+                    const isUnassessed = score === undefined || score === null || typeof score !== 'number' || isNaN(score);
+                    const numScore = isUnassessed ? 0 : Number(score);
+                    const labelPt = key === 'rendering' ? 'renderização' :
+                      key === 'palette' ? 'paleta' :
+                      key === 'details' ? 'detalhes' :
+                      key === 'effects' ? 'efeitos' :
+                      key === 'materials' ? 'materiais' :
+                      key === 'lighting' ? 'iluminação' :
+                      key === 'composition' ? 'composição' :
+                      key === 'pose' ? 'pose & movimento' :
+                      key === 'silhouette' ? 'silhueta' :
+                      key === 'style' ? 'estilo geral' :
+                      key === 'background' ? 'cenário / fundo' :
+                      key === 'detailDensity' ? 'densidade de detalhes' : key;
+                    const justification = selectedDna.scoreJustifications?.[key];
+
+                    return (
+                      <div key={key} className="space-y-1">
+                        <div className="flex justify-between text-[9px] uppercase tracking-wider font-bold">
+                          <span className="text-stone-400">
+                            {labelPt}
+                            {key === 'detailDensity' && (
+                              <span className="ml-1 text-[8px] text-stone-500 font-normal lowercase">(descritor)</span>
+                            )}
+                          </span>
+                          {isUnassessed ? (
+                            <span className="text-stone-600 font-mono text-[8px]">N/A (Não avaliado)</span>
+                          ) : numScore === 0 ? (
+                            <span className="text-stone-500 font-mono">0% (Sem contribuição)</span>
+                          ) : (
+                            <span className="text-amber-500 font-mono">{(numScore * 100).toFixed(0)}%</span>
+                          )}
+                        </div>
+                        <div className="w-full h-1.5 bg-stone-900 rounded-full overflow-hidden">
+                          {isUnassessed ? (
+                            <div className="h-full w-full bg-stone-900/60 border border-dashed border-stone-800 rounded-full" />
+                          ) : (
+                            <div
+                              className={`h-full rounded-full transition-all duration-300 ${
+                                numScore === 0 
+                                  ? 'w-0' 
+                                  : key === 'detailDensity' 
+                                    ? 'bg-gradient-to-r from-amber-900 to-amber-600' 
+                                    : 'bg-gradient-to-r from-amber-800 to-amber-500'
+                              }`}
+                              style={{ width: `${Math.max(0, Math.min(100, numScore * 100))}%` }}
+                            />
+                          )}
+                        </div>
+                        {justification && (
+                          <p className="text-[9px] text-stone-400 italic font-normal line-clamp-2 mt-0.5 pl-1.5 border-l border-amber-900/30">
+                            "{justification}"
+                          </p>
+                        )}
                       </div>
-                      <div className="w-full h-1.5 bg-stone-900 rounded-full overflow-hidden">
-                        <div className="h-full bg-gradient-to-r from-amber-800 to-amber-500 rounded-full" style={{ width: `${(score as number) * 100}%` }} />
-                      </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </div>
 

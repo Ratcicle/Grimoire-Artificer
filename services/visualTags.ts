@@ -32,7 +32,8 @@ export const VISUAL_TAG_CATEGORIES: Record<string, string[]> = {
     "chitin", "scales", "fur", "feathers", "leather", "wood", "bark",
     "roots", "vines", "fungal growth", "smoke body", "mist body", "liquid body",
     "slime body", "shadow body", "light body", "energy body", "plasma body",
-    "flame body", "ice body", "sand body", "cosmic matter"
+    "flame body", "ice body", "sand body", "cosmic matter",
+    "fabric", "silk", "satin", "velvet", "lace"
   ],
   "Surface / Finish": [
     "polished", "glossy", "matte", "reflective", "translucent", "transparent",
@@ -42,8 +43,9 @@ export const VISUAL_TAG_CATEGORIES: Record<string, string[]> = {
     "layered", "plated", "engraved", "ornamented", "veined", "scaled texture",
     "faceted", "porous", "fibrous", "molten", "wet", "oozing", "smoking",
     "frosted", "electrified", "glowing from within", "light-absorbing",
-    "energy-cracked"
+    "energy-cracked", "embroidered"
   ],
+
   "Elements": [
     "fire", "water", "ice", "wind", "earth", "lightning", "light", "darkness",
     "shadow", "poison", "acid", "plant", "fungal", "sand", "magma", "plasma",
@@ -63,10 +65,88 @@ export const DEFAULT_VISUAL_DNA_SCORES = {
   style: 0.5, palette: 0.5, pose: 0.5, composition: 0.5, lighting: 0.5, effects: 0.5, materials: 0.5, background: 0.5, details: 0.5, silhouette: 0.5, rendering: 0.5
 };
 
+export const VALID_UTILITY_DIMENSIONS = [
+  'style', 'palette', 'pose', 'composition', 'lighting', 'effects',
+  'materials', 'background', 'details', 'silhouette', 'rendering', 'detailDensity'
+] as const;
+
+export interface ScoreValidationResult {
+  isValid: boolean;
+  errors: string[];
+  validatedScores: Record<string, number | undefined>;
+  justifications: Record<string, string>;
+  isCalibrated: boolean;
+}
+
+export const validateVisualDNAScores = (
+  rawScores: any,
+  rawJustifications?: any
+): ScoreValidationResult => {
+  const errors: string[] = [];
+  const validatedScores: Record<string, number | undefined> = {};
+  const justifications: Record<string, string> = {};
+
+  if (!rawScores || typeof rawScores !== 'object' || Array.isArray(rawScores)) {
+    return {
+      isValid: false,
+      errors: ["Scores must be an object with numeric utility ratings between 0.0 and 1.0."],
+      validatedScores: {},
+      justifications: {},
+      isCalibrated: false
+    };
+  }
+
+  for (const dim of VALID_UTILITY_DIMENSIONS) {
+    if (!(dim in rawScores)) {
+      continue;
+    }
+
+    const val = rawScores[dim];
+
+    if (val === null || val === undefined) {
+      continue;
+    }
+
+    if (typeof val === 'boolean' || typeof val === 'string' || typeof val !== 'number') {
+      errors.push(`Score for "${dim}" must be a number, received ${typeof val} (${JSON.stringify(val)}).`);
+      continue;
+    }
+
+    if (isNaN(val) || !Number.isFinite(val)) {
+      errors.push(`Score for "${dim}" must be a finite number, received ${val}.`);
+      continue;
+    }
+
+    if (val < 0.0 || val > 1.0) {
+      errors.push(`Score for "${dim}" must be between 0.0 and 1.0, received ${val}. Values outside contract must not be clamped or guessed.`);
+      continue;
+    }
+
+    validatedScores[dim] = val;
+  }
+
+  if (rawJustifications && typeof rawJustifications === 'object' && !Array.isArray(rawJustifications)) {
+    for (const [k, v] of Object.entries(rawJustifications)) {
+      if (typeof v === 'string' && v.trim()) {
+        justifications[k] = v.trim().replace(/\s+/g, ' ');
+      }
+    }
+  }
+
+  return {
+    isValid: errors.length === 0,
+    errors,
+    validatedScores,
+    justifications,
+    isCalibrated: errors.length === 0
+  };
+};
+
 export const normalizeVisualDNAAnalysis = (parsed: any, originalWarnings: string[] = []): Partial<VisualDNA> => {
-  const normalized = { ...parsed };
+  // Deep clone to ensure input object is never mutated
+  const normalized: any = JSON.parse(JSON.stringify(parsed || {}));
   
-  const remoteWarnings = Array.isArray(parsed.warnings)
+  const remoteWarnings = Array.isArray(parsed?.warnings)
     ? parsed.warnings.filter((value: any): value is string => typeof value === "string")
     : [];
     
@@ -250,20 +330,36 @@ export const normalizeVisualDNAAnalysis = (parsed: any, originalWarnings: string
 
   normalized.tags = combinedTags.slice(0, 14);
 
-  if (normalized.scores) {
-    Object.keys(normalized.scores).forEach(key => {
-      let val = Number(normalized.scores[key]);
-      if (isNaN(val)) val = 0.5;
-      normalized.scores[key] = Math.max(0, Math.min(1, val));
-    });
-    // Ensure all scores exist
-    Object.keys(DEFAULT_VISUAL_DNA_SCORES).forEach(key => {
-      if (normalized.scores[key] === undefined) {
-         normalized.scores[key] = (DEFAULT_VISUAL_DNA_SCORES as any)[key];
+  if (parsed.scores && typeof parsed.scores === 'object') {
+    const scoreVal = validateVisualDNAScores(parsed.scores, parsed.scoreJustifications);
+    normalized.scores = scoreVal.validatedScores;
+    if (Object.keys(scoreVal.justifications).length > 0) {
+      normalized.scoreJustifications = scoreVal.justifications;
+    }
+    if (scoreVal.isValid) {
+      if (parsed.isCalibrated !== false) {
+        normalized.isCalibrated = true;
+        normalized.calibrationVersion = parsed.calibrationVersion || 3;
+      } else {
+        normalized.isCalibrated = false;
       }
-    });
+    } else {
+      warnings.push(...scoreVal.errors);
+      normalized.isCalibrated = false;
+      normalized.calibrationVersion = undefined;
+    }
   } else {
-    normalized.scores = { ...DEFAULT_VISUAL_DNA_SCORES };
+    normalized.scores = {};
+    normalized.isCalibrated = false;
+  }
+
+  if (parsed.scoreJustifications && typeof parsed.scoreJustifications === 'object') {
+    normalized.scoreJustifications = normalized.scoreJustifications || {};
+    for (const [k, v] of Object.entries(parsed.scoreJustifications)) {
+      if (typeof v === 'string' && v.trim()) {
+        normalized.scoreJustifications[k] = v.trim().replace(/\s+/g, ' ');
+      }
+    }
   }
 
   normalized.analysisVersion = 3;
@@ -385,6 +481,11 @@ export const VISUAL_TAG_KEYWORDS: Record<string, string[]> = {
   "ice body": ["ice body", "made of ice", "frozen form", "glacial body"],
   "sand body": ["sand body", "made of sand", "shifting dust"],
   "cosmic matter": ["cosmic matter", "star stuff", "made of stars", "nebula body"],
+  "fabric": ["fabric", "cloth", "textile", "tecido", "linen", "pano", "garment"],
+  "silk": ["silk", "seda", "silken"],
+  "satin": ["satin", "cetim"],
+  "velvet": ["velvet", "veludo", "velveteen"],
+  "lace": ["lace", "renda", "lacework"],
 
   // Surface / Finish
   "polished": ["polished", "shiny", "gleaming", "burnished"],
@@ -429,6 +530,7 @@ export const VISUAL_TAG_KEYWORDS: Record<string, string[]> = {
   "glowing from within": ["glowing from within", "internal light", "bioluminescent", "glowing core"],
   "light-absorbing": ["light-absorbing", "pitch black", "void-like"],
   "energy-cracked": ["energy-cracked", "cracked with energy", "glowing cracks", "fissured energy"],
+  "embroidered": ["embroidered", "embroidery", "bordado", "bordada", "needlework"],
 
   // Elements
   "fire": ["fire", "flame", "ember", "burning", "lava", "ash", "blaze", "scorch", "flaming"],

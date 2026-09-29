@@ -342,6 +342,26 @@ export const getMatchingLogs = (
   }).sort((a, b) => b.weight - a.weight);
 };
 
+export const getEffectiveUtilityScore = (
+  ref: VisualDNA,
+  scoreKey: keyof VisualDNA['scores']
+): number => {
+  if (!ref || !ref.scores) return 0;
+  const rawScore = ref.scores[scoreKey];
+  if (typeof rawScore !== 'number' || isNaN(rawScore) || !Number.isFinite(rawScore)) {
+    return 0;
+  }
+  // If calibrated under V3 contract
+  if (ref.isCalibrated || (ref.calibrationVersion && ref.calibrationVersion >= 3)) {
+    return rawScore;
+  }
+  // Legacy / uncalibrated compatibility:
+  // Maps uncalibrated scores to a conservative baseline [0, 0.5]
+  // This ensures an uncalibrated 1.0 (0.5) never overrules a solid calibrated score (e.g. 0.75, 0.85),
+  // while preserving relative ordering among uncalibrated records deterministically.
+  return Math.min(0.5, Math.max(0, rawScore * 0.5));
+};
+
 export interface SynthesizeParams {
   references: VisualDNA[];
   intensity: "low" | "medium" | "high";
@@ -446,9 +466,12 @@ export const synthesizeVisualDNA = (
     scoreKey: keyof VisualDNA['scores']
   ): string => {
     const sorted = [...references].sort((a, b) => {
-      const scoreA = (a.scores && typeof a.scores[scoreKey] === 'number') ? (a.scores[scoreKey] as number) : 0.5;
-      const scoreB = (b.scores && typeof b.scores[scoreKey] === 'number') ? (b.scores[scoreKey] as number) : 0.5;
-      return scoreB - scoreA;
+      const scoreA = getEffectiveUtilityScore(a, scoreKey);
+      const scoreB = getEffectiveUtilityScore(b, scoreKey);
+      if (scoreA !== scoreB) {
+        return scoreB - scoreA;
+      }
+      return references.indexOf(a) - references.indexOf(b);
     });
 
     for (const ref of sorted) {
