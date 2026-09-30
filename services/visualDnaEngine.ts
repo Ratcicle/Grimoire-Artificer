@@ -1,5 +1,5 @@
 import { VisualDNA, SynthesisDebug, MatchDetail, DNAMatchingResult, MatchingScoreLog, CardType, Context, Complexity, Archetype } from "../types";
-import { VISUAL_TAG_KEYWORDS } from "./visualTags";
+import { VISUAL_TAG_KEYWORDS, isCalibratedRecord } from "./visualTags";
 import { parsePromptIntent } from "./promptParser";
 import { ARCHETYPE_DEFINITIONS } from "../constants";
 import {
@@ -348,11 +348,12 @@ export const getEffectiveUtilityScore = (
 ): number => {
   if (!ref || !ref.scores) return 0;
   const rawScore = ref.scores[scoreKey];
-  if (typeof rawScore !== 'number' || isNaN(rawScore) || !Number.isFinite(rawScore)) {
+  // Defensively verify number
+  if (typeof rawScore !== 'number' || isNaN(rawScore) || !Number.isFinite(rawScore) || rawScore < 0 || rawScore > 1) {
     return 0;
   }
-  // If calibrated under V3 contract
-  if (ref.isCalibrated || (ref.calibrationVersion && ref.calibrationVersion >= 3)) {
+  // Unified calibration check:
+  if (isCalibratedRecord(ref)) {
     return rawScore;
   }
   // Legacy / uncalibrated compatibility:

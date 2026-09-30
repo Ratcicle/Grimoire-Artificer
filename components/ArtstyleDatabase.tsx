@@ -27,7 +27,7 @@ interface ArtstyleDatabaseProps {
   onBackToGrimoire: () => void;
 }
 
-import { VISUAL_TAG_CATEGORIES, ALLOWED_VISUAL_TAGS, VISUAL_TAG_KEYWORDS } from "../services/visualTags";
+import { VISUAL_TAG_CATEGORIES, ALLOWED_VISUAL_TAGS, VISUAL_TAG_KEYWORDS, isCalibratedRecord } from "../services/visualTags";
 
 const ALLOWED_TAGS = ALLOWED_VISUAL_TAGS;
 
@@ -1087,7 +1087,7 @@ const ArtstyleDatabase: React.FC<ArtstyleDatabaseProps> = ({ onBackToGrimoire })
                         Legacy Engine
                       </span>
                     )}
-                    {selectedDna.isCalibrated ? (
+                    {isCalibratedRecord(selectedDna) ? (
                       <span className="px-1.5 py-0.5 bg-emerald-950/80 text-emerald-400 border border-emerald-800/40 text-[8px] font-bold font-mono uppercase rounded tracking-wider" title="Utility Matrix calibrada sob contrato V3">
                         Calibrado (V3)
                       </span>
@@ -1398,7 +1398,7 @@ const ArtstyleDatabase: React.FC<ArtstyleDatabaseProps> = ({ onBackToGrimoire })
                   <label className="text-[10px] font-bold text-stone-500 uppercase tracking-widest flex items-center gap-1.5">
                     <BarChart3 size={12} /> Utility Matrix
                   </label>
-                  {selectedDna.isCalibrated ? (
+                  {isCalibratedRecord(selectedDna) ? (
                     <span className="text-[8px] font-mono font-bold text-emerald-400 uppercase tracking-wider bg-emerald-950/50 px-1.5 py-0.5 rounded border border-emerald-900/30">
                       Calibrado
                     </span>

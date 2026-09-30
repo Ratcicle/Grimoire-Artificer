@@ -65,10 +65,107 @@ export const DEFAULT_VISUAL_DNA_SCORES = {
   style: 0.5, palette: 0.5, pose: 0.5, composition: 0.5, lighting: 0.5, effects: 0.5, materials: 0.5, background: 0.5, details: 0.5, silhouette: 0.5, rendering: 0.5
 };
 
-export const VALID_UTILITY_DIMENSIONS = [
-  'style', 'palette', 'pose', 'composition', 'lighting', 'effects',
-  'materials', 'background', 'details', 'silhouette', 'rendering', 'detailDensity'
+export const SUPPORTED_CALIBRATION_VERSIONS = [3] as const;
+
+export const UTILITY_DIMENSIONS = [
+  'rendering', 'composition', 'palette', 'lighting', 'materials',
+  'background', 'details', 'effects', 'pose', 'silhouette', 'style'
 ] as const;
+
+export const DESCRIPTOR_DIMENSIONS = ['detailDensity'] as const;
+
+export const ALL_CANONICAL_DIMENSIONS = [
+  'rendering', 'composition', 'palette', 'lighting', 'materials',
+  'background', 'details', 'effects', 'pose', 'silhouette', 'style',
+  'detailDensity'
+] as const;
+
+export const VALID_UTILITY_DIMENSIONS = ALL_CANONICAL_DIMENSIONS;
+
+export const TECHNICAL_ANALYSIS_FIELDS = [
+  'linework', 'rendering', 'palette', 'silhouette', 'pose', 'framing',
+  'composition', 'lighting', 'effects', 'materials', 'details', 'background',
+  'hierarchy', 'visualMotifs', 'shapeLanguage', 'focalAnchors', 'detailPlacement',
+  'compositionRecipe', 'paletteLogic', 'materialBehavior', 'energyDesign',
+  'styleAnchors', 'avoidRules'
+] as const;
+
+export const isCalibratedRecord = (
+  ref: Partial<VisualDNA> | null | undefined
+): boolean => {
+  if (!ref || typeof ref !== 'object') return false;
+  if (ref.isCalibrated !== true) return false;
+  if (typeof ref.calibrationVersion !== 'number' || !SUPPORTED_CALIBRATION_VERSIONS.includes(ref.calibrationVersion as any)) {
+    return false;
+  }
+  if (!ref.scores || typeof ref.scores !== 'object' || Array.isArray(ref.scores)) {
+    return false;
+  }
+  // Must have at least one valid utility dimension evaluated (excluding detailDensity)
+  return UTILITY_DIMENSIONS.some(dim => {
+    const val = (ref.scores as any)[dim];
+    return typeof val === 'number' && Number.isFinite(val) && val >= 0.0 && val <= 1.0;
+  });
+};
+
+export interface AnalysisCompletenessResult {
+  isUsable: boolean;
+  errors: string[];
+}
+
+export const validateAnalysisCompleteness = (
+  rawJson: any
+): AnalysisCompletenessResult => {
+  const errors: string[] = [];
+
+  if (!rawJson || typeof rawJson !== 'object' || Array.isArray(rawJson)) {
+    return { isUsable: false, errors: ["Analysis response must be a valid JSON object."] };
+  }
+
+  // 1. summary non-empty string after trim
+  if (typeof rawJson.summary !== 'string' || rawJson.summary.trim().length === 0) {
+    errors.push("Analysis must include a non-empty summary after trimming.");
+  }
+
+  // 2. At least one technical field or at least one stylePromptFragments item
+  const hasTechnicalField = TECHNICAL_ANALYSIS_FIELDS.some(field => {
+    const val = rawJson[field];
+    return typeof val === 'string' && val.trim().length > 0;
+  });
+
+  const hasStyleFragment = Array.isArray(rawJson.stylePromptFragments) &&
+    rawJson.stylePromptFragments.some((frag: any) => typeof frag === 'string' && frag.trim().length > 0);
+
+  if (!hasTechnicalField && !hasStyleFragment) {
+    errors.push("Analysis must include at least one non-empty technical description field or style prompt fragment.");
+  }
+
+  // 3. At least one utility dimension evaluated with a valid number in [0, 1]
+  const scoresObj = rawJson.scores;
+  if (!scoresObj || typeof scoresObj !== 'object' || Array.isArray(scoresObj)) {
+    errors.push("Analysis must include a scores object with at least one evaluated utility dimension.");
+  } else {
+    for (const [key, val] of Object.entries(scoresObj)) {
+      if (val === null) {
+        errors.push(`Score for "${key}" cannot be null; omit the field if not evaluated.`);
+      }
+    }
+
+    const hasUtilityScore = UTILITY_DIMENSIONS.some(dim => {
+      const val = scoresObj[dim];
+      return typeof val === 'number' && Number.isFinite(val) && val >= 0.0 && val <= 1.0;
+    });
+
+    if (!hasUtilityScore) {
+      errors.push("Analysis must evaluate at least one utility dimension (detailDensity alone does not count).");
+    }
+  }
+
+  return {
+    isUsable: errors.length === 0,
+    errors
+  };
+};
 
 export interface ScoreValidationResult {
   isValid: boolean;
@@ -103,7 +200,12 @@ export const validateVisualDNAScores = (
 
     const val = rawScores[dim];
 
-    if (val === null || val === undefined) {
+    if (val === null) {
+      errors.push(`Score for "${dim}" cannot be null; omit the field if not evaluated.`);
+      continue;
+    }
+
+    if (val === undefined) {
       continue;
     }
 
@@ -122,6 +224,7 @@ export const validateVisualDNAScores = (
       continue;
     }
 
+    // Only assign valid finite numbers (never assign undefined properties)
     validatedScores[dim] = val;
   }
 
@@ -330,27 +433,26 @@ export const normalizeVisualDNAAnalysis = (parsed: any, originalWarnings: string
 
   normalized.tags = combinedTags.slice(0, 14);
 
-  if (parsed.scores && typeof parsed.scores === 'object') {
+  if (parsed.scores && typeof parsed.scores === 'object' && !Array.isArray(parsed.scores)) {
     const scoreVal = validateVisualDNAScores(parsed.scores, parsed.scoreJustifications);
     normalized.scores = scoreVal.validatedScores;
     if (Object.keys(scoreVal.justifications).length > 0) {
       normalized.scoreJustifications = scoreVal.justifications;
     }
-    if (scoreVal.isValid) {
-      if (parsed.isCalibrated !== false) {
-        normalized.isCalibrated = true;
-        normalized.calibrationVersion = parsed.calibrationVersion || 3;
-      } else {
-        normalized.isCalibrated = false;
-      }
+    if (scoreVal.isValid && isCalibratedRecord(parsed)) {
+      normalized.isCalibrated = true;
+      normalized.calibrationVersion = parsed.calibrationVersion;
     } else {
-      warnings.push(...scoreVal.errors);
       normalized.isCalibrated = false;
       normalized.calibrationVersion = undefined;
+    }
+    if (!scoreVal.isValid) {
+      warnings.push(...scoreVal.errors);
     }
   } else {
     normalized.scores = {};
     normalized.isCalibrated = false;
+    normalized.calibrationVersion = undefined;
   }
 
   if (parsed.scoreJustifications && typeof parsed.scoreJustifications === 'object') {

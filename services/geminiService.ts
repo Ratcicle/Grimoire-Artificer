@@ -14,7 +14,7 @@ import {
 import { getLocalDNA } from "./localDbService";
 import { getAutomaticReferences, getMatchingLogs, resolveManualReferences, synthesizeVisualDNA } from "./visualDnaEngine";
 import { parsePromptIntent } from "./promptParser";
-import { normalizeVisualDNAAnalysis, validateVisualDNAScores } from "./visualTags";
+import { normalizeVisualDNAAnalysis, validateVisualDNAScores, validateAnalysisCompleteness } from "./visualTags";
 import { VISUAL_TAG_CATEGORIES, VISUAL_TAG_KEYWORDS } from "./visualTags";
 import { ARCHETYPE_DEFINITIONS } from "../constants";
 import { GRIMOIRE_SYSTEM_PROMPT } from "../constants";
@@ -157,7 +157,7 @@ export const VISUAL_DNA_RESPONSE_SCHEMA = {
     tags: { type: Type.ARRAY, items: { type: Type.STRING }, maxItems: 14 },
     scores: {
       type: Type.OBJECT,
-      description: "Utility matrix scores strictly between 0.0 and 1.0 (decimals like 0.85, never > 1). Represents reusable visual guidance for that dimension. NOT beauty score.",
+      description: "Utility matrix scores in inclusive range [0.0, 1.0] (decimals like 0.0, 0.40, 0.75, 1.0). Represents reusable visual guidance for that dimension. NOT beauty score.",
       properties: {
         style: { type: Type.NUMBER, description: "Utility 0.0-1.0: clear guidance for overall stylistic cohesion." },
         palette: { type: Type.NUMBER, description: "Utility 0.0-1.0: clear guidance for color harmony and lighting/shadow palette balance." },
@@ -467,10 +467,10 @@ RUBRIC FOR UTILITY SCORES:
 - 1.0: Masterclass benchmark exemplar with explicit evidence.
 
 CRITICAL CONTRACT RULES FOR SCORES:
-1. Every score MUST be a finite decimal number strictly between 0.0 and 1.0 (e.g. 0.85, 0.70, 0.40).
+1. Every score MUST be a finite decimal number in the inclusive range [0.0, 1.0] (e.g. 0.0, 0.40, 0.75, 1.0). Both 0.0 and 1.0 are valid boundary values.
 2. NEVER output percentages or integers like 85, 90, or 100.
-3. Do NOT artificially randomize scores, and do not forbid equal scores.
-4. Do NOT output 1.0 for every dimension. Evaluate each dimension independently based on visible evidence.
+3. Do NOT artificially randomize scores, and do not force artificial equality or inequality.
+4. Evaluate each dimension independently based on clear visual evidence. Provide specific visible evidence in 'scoreJustifications' for each evaluated dimension. Do NOT arbitrarily lower or raise scores.
 5. Simplicity is not low utility: a simple or minimalist background can be an excellent 0.80+ reference for visual separation, clean hierarchy, and graphic negative space.
 6. 'detailDensity' is a DESCRIPTOR of visual detail concentration from 0.0 (minimal/flat/spartan) to 1.0 (hyper-dense micro-details). It is NOT a score of utility or beauty!
 7. In 'scoreJustifications', provide a concise 1-sentence explanation citing visible evidence for each evaluated dimension. Do NOT repeat generic praise like "high quality" or "highly detailed".
@@ -520,13 +520,13 @@ Provide concrete observations rather than generic fluff:
 ======================================================================
 5. TAXONOMY TAGS
 ======================================================================
-ALLOWED TAGS LIST (Choose ONLY from this taxonomy list for the 'tags' array. Pick between 6 to 14 tags in total):
+ALLOWED TAGS LIST (Choose ONLY from this taxonomy list for the 'tags' array. Pick up to 14 tags in total):
 
 ${tagsListBySection}
 
 CRITICAL RULES FOR TAGGING:
 1. Return ONLY tags that are present in the ALLOWED TAGS LIST taxonomy above. DO NOT invent or use other tags.
-2. Select between 6 and 14 tags in total.
+2. Select up to 14 tags in total. There is NO minimum number of tags; tag ONLY observable visual features supported by the image. Categories with no visual evidence must remain empty.
 3. Omit entire categories if they do not apply to the image (e.g., if there are no elemental features, do not select any element tags).
 4. Prioritize SPECIFICITY and precision rather than just filling up the maximum limit.
 5. DO NOT infer materials, elements, or scale based on lore or assumed character identities; tag ONLY observable visual features present in the image.
@@ -583,7 +583,7 @@ CRITICAL: Return ONLY valid JSON. Do NOT wrap in markdown code blocks like \`\`\
       : rawText;
     const parsedRaw = JSON.parse(cleanJson);
 
-    // Strict local validation before normalization and saving
+    // 1. Score validation: strict numeric validity [0.0, 1.0]
     const scoreVal = validateVisualDNAScores(parsedRaw.scores, parsedRaw.scoreJustifications);
     if (!scoreVal.isValid) {
       throw new GeminiOperationError(
@@ -593,15 +593,20 @@ CRITICAL: Return ONLY valid JSON. Do NOT wrap in markdown code blocks like \`\`\
       );
     }
 
-    if (!parsedRaw.summary || typeof parsedRaw.summary !== 'string') {
+    // 2. Completeness validation: non-empty trimmed summary, at least one technical field or fragment, at least one utility dimension
+    const completeness = validateAnalysisCompleteness(parsedRaw);
+    if (!completeness.isUsable) {
       throw new GeminiOperationError(
-        "Visual DNA analysis validation failed: Missing required summary field.",
+        `Visual DNA analysis incomplete: ${completeness.errors.join("; ")}`,
         response.usageMetadata,
         "Analyze Reference Image"
       );
     }
 
+    // 3. Normalization (raw input is deep-cloned and never mutated)
     const parsed = normalizeVisualDNAAnalysis(parsedRaw);
+
+    // 4. Assign local calibration markers ONLY after all validations pass
     parsed.isCalibrated = true;
     parsed.calibrationVersion = 3;
     return { data: parsed, usageMetadata: response.usageMetadata };

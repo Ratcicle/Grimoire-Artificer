@@ -18,7 +18,8 @@ import {
   validateVisualDNAScores,
   normalizeVisualDNAAnalysis,
   ALLOWED_VISUAL_TAGS,
-  VISUAL_TAG_CATEGORIES
+  VISUAL_TAG_CATEGORIES,
+  isCalibratedRecord
 } from "./visualTags";
 import {
   synthesizeVisualDNA,
@@ -639,4 +640,128 @@ describe("GRIMOIRE ARTIFICER — RODADA 3A: Contrato e Calibração da Utility M
     ];
     expect(avoids.some(a => /soft edges?|soft gradients?/i.test(a))).toBe(false);
   });
+
+  // COMPLEMENTO DA RODADA 3A: TESTES ESPECÍFICOS
+
+  // TEST 14: Respostas vazias ou sem análise utilizável são estritamente recusadas
+  it("14. Rejects empty summary or responses without usable analysis before saving", async () => {
+    // Empty / whitespace summary
+    generateContentMock.mockResolvedValue({
+      text: JSON.stringify({
+        summary: "   ",
+        scores: {}
+      }),
+      usageMetadata: { promptTokenCount: 15, totalTokenCount: 25 }
+    });
+
+    await expect(analyzeReferenceImage("data:image/png;base64,sample", "test.png")).rejects.toThrow(GeminiOperationError);
+    await expect(analyzeReferenceImage("data:image/png;base64,sample", "test.png")).rejects.toThrow(/incomplete: .*summary/i);
+
+    // Response with summary but no technical fields and no utility dimensions
+    generateContentMock.mockResolvedValue({
+      text: JSON.stringify({
+        summary: "Just a picture of something",
+        scores: {}
+      }),
+      usageMetadata: { promptTokenCount: 15, totalTokenCount: 25 }
+    });
+
+    await expect(analyzeReferenceImage("data:image/png;base64,sample", "test.png")).rejects.toThrow(/technical description field|utility dimension/i);
+  });
+
+  // TEST 15: Zero é uma avaliação válida de utilidade e detailDensity sozinho não é utilidade
+  it("15. Valid zero counts as evaluated utility dimension; detailDensity alone does not count", async () => {
+    // Only detailDensity (no utility dimension) -> must be rejected
+    generateContentMock.mockResolvedValueOnce({
+      text: JSON.stringify({
+        summary: "Detailed scene",
+        rendering: "smooth gradients",
+        scores: {
+          detailDensity: 0.8
+        }
+      }),
+      usageMetadata: { promptTokenCount: 15, totalTokenCount: 25 }
+    });
+
+    await expect(analyzeReferenceImage("data:image/png;base64,sample", "test.png")).rejects.toThrow(/at least one utility dimension/i);
+
+    // Rendering with valid zero + technical field -> accepted
+    generateContentMock.mockResolvedValueOnce({
+      text: JSON.stringify({
+        summary: "Flat simple graphic",
+        rendering: "flat vector colors without shading",
+        scores: {
+          rendering: 0.0,
+          detailDensity: 0.1
+        }
+      }),
+      usageMetadata: { promptTokenCount: 20, totalTokenCount: 40 }
+    });
+
+    const result = await analyzeReferenceImage("data:image/png;base64,sample", "test.png");
+    expect(result.data.scores?.rendering).toBe(0.0);
+    expect(result.data.isCalibrated).toBe(true);
+    expect(result.data.calibrationVersion).toBe(3);
+  });
+
+  // TEST 16: Registros antigos sem marcadores não são promovidos a calibrados
+  it("16. normalizeVisualDNAAnalysis does NOT promote uncalibrated records or analysisVersion: 3 to calibrated", () => {
+    const legacyRecord = {
+      summary: "Existing V3 record",
+      analysisVersion: 3,
+      scores: {
+        rendering: 1,
+        composition: 1
+      }
+    };
+
+    const norm = normalizeVisualDNAAnalysis(legacyRecord);
+    expect(norm.isCalibrated).toBe(false);
+    expect(norm.calibrationVersion).toBeUndefined();
+    expect(isCalibratedRecord(norm)).toBe(false);
+  });
+
+  // TEST 17: Unificação de interpretação: registro com isCalibrated: false e calibrationVersion: 3 é tratado como legado
+  it("17. Inconsistent records (isCalibrated: false, calibrationVersion: 3) are treated as uncalibrated by both engine and UI check", () => {
+    const inconsistentRecord = createBaseRef("inconsistent-ref", "Inconsistent Ref", {
+      scores: {
+        rendering: 1.0,
+        composition: 0.8
+      },
+      isCalibrated: false,
+      calibrationVersion: 3
+    });
+
+    // isCalibratedRecord must return false
+    expect(isCalibratedRecord(inconsistentRecord)).toBe(false);
+
+    // getEffectiveUtilityScore must damp legacy score to conservative range (1.0 * 0.5 = 0.5)
+    const effectiveRendering = getEffectiveUtilityScore(inconsistentRecord, "rendering");
+    expect(effectiveRendering).toBe(0.5);
+    expect(effectiveRendering).not.toBe(1.0);
+  });
+
+  // TEST 18: Preservação de usageMetadata em erros de validação
+  it("18. Preserves usageMetadata when throwing GeminiOperationError for invalid analysis", async () => {
+    generateContentMock.mockResolvedValueOnce({
+      text: JSON.stringify({
+        summary: "Invalid score range",
+        rendering: "cel shading",
+        scores: {
+          rendering: 15.0 // invalid
+        }
+      }),
+      usageMetadata: { promptTokenCount: 123, totalTokenCount: 456 }
+    });
+
+    try {
+      await analyzeReferenceImage("data:image/png;base64,sample", "test.png");
+      expect.fail("Should have thrown GeminiOperationError");
+    } catch (err: any) {
+      expect(err).toBeInstanceOf(GeminiOperationError);
+      expect(err.usageMetadata?.promptTokenCount).toBe(123);
+      expect(err.usageMetadata?.totalTokenCount).toBe(456);
+    }
+  });
 });
+
