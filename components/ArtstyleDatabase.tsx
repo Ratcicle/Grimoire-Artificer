@@ -27,7 +27,13 @@ interface ArtstyleDatabaseProps {
   onBackToGrimoire: () => void;
 }
 
-import { VISUAL_TAG_CATEGORIES, ALLOWED_VISUAL_TAGS, VISUAL_TAG_KEYWORDS, isCalibratedRecord } from "../services/visualTags";
+import { 
+  VISUAL_TAG_CATEGORIES, 
+  ALLOWED_VISUAL_TAGS, 
+  VISUAL_TAG_KEYWORDS, 
+  isCalibratedRecord,
+  getUtilityMatrixPresentationRows 
+} from "../services/visualTags";
 
 const ALLOWED_TAGS = ALLOWED_VISUAL_TAGS;
 
@@ -1014,13 +1020,13 @@ const ArtstyleDatabase: React.FC<ArtstyleDatabaseProps> = ({ onBackToGrimoire })
                   <span className="text-[10px] font-mono font-bold uppercase tracking-widest text-amber-500 animate-pulse">Reanalisando estilo...</span>
                 </div>
               )}
-              <div className="absolute inset-0 bg-gradient-to-t from-stone-950 via-stone-950/20 to-transparent" />
-              <div className="absolute top-4 right-4 flex gap-2">
+              <div className="absolute inset-0 bg-gradient-to-t from-stone-950 via-stone-950/20 to-transparent pointer-events-none" />
+              <div className="absolute top-3 right-3 flex gap-1.5 z-30">
                 {!isEditing ? (
                   <>
                     <button 
                       onClick={handleEditClick} 
-                      className="p-2 rounded-md bg-stone-950/90 text-stone-300 hover:text-amber-500 hover:bg-stone-900 transition-all border border-stone-800"
+                      className="p-2 rounded-md bg-stone-950/90 text-stone-300 hover:text-amber-500 hover:bg-stone-900 transition-all border border-stone-800 shadow-md cursor-pointer"
                       title="Edit memory details"
                     >
                       <Edit2 size={12} />
@@ -1028,7 +1034,7 @@ const ArtstyleDatabase: React.FC<ArtstyleDatabaseProps> = ({ onBackToGrimoire })
                     <button 
                       onClick={() => !reanalyzingIds.has(selectedDna.id) && handleReanalyze(selectedDna)} 
                       disabled={reanalyzingIds.has(selectedDna.id)}
-                      className={`p-2 rounded-md transition-all border ${
+                      className={`p-2 rounded-md transition-all border shadow-md cursor-pointer ${
                         reanalyzingIds.has(selectedDna.id)
                           ? 'bg-amber-900/40 text-amber-500 border-amber-900/30 cursor-not-allowed animate-pulse'
                           : reanalyzingConfirmId === selectedDna.id
@@ -1047,7 +1053,7 @@ const ArtstyleDatabase: React.FC<ArtstyleDatabaseProps> = ({ onBackToGrimoire })
                     </button>
                     <button 
                       onClick={() => handleDelete(selectedDna.id)} 
-                      className={`p-2 rounded-md transition-all border ${
+                      className={`p-2 rounded-md transition-all border shadow-md cursor-pointer ${
                         deletingId === selectedDna.id
                           ? 'bg-red-900/90 text-red-100 border-red-500'
                           : 'bg-stone-950/90 text-stone-300 hover:text-red-400 hover:bg-stone-900 border-stone-800'
@@ -1060,23 +1066,23 @@ const ArtstyleDatabase: React.FC<ArtstyleDatabaseProps> = ({ onBackToGrimoire })
                 ) : (
                   <button 
                     onClick={() => setIsEditing(false)} 
-                    className="p-2 rounded-md bg-stone-950/90 text-stone-300 hover:text-white hover:bg-stone-900 transition-all border border-stone-800"
+                    className="p-2 rounded-md bg-stone-950/90 text-stone-300 hover:text-white hover:bg-stone-900 transition-all border border-stone-800 shadow-md cursor-pointer"
                   >
                     <X size={12} />
                   </button>
                 )}
               </div>
 
-              <div className="absolute inset-x-0 bottom-0 p-5">
+              <div className="absolute inset-x-0 bottom-0 p-4 pt-10 bg-gradient-to-t from-stone-950 via-stone-950/80 to-transparent pointer-events-none">
                 {isEditing ? (
                   <input
                     type="text"
                     value={editName}
                     onChange={(e) => setEditName(e.target.value)}
-                    className="w-full bg-stone-900/90 border border-amber-600 rounded px-3 py-1 text-sm font-bold text-stone-100 focus:outline-none"
+                    className="w-full bg-stone-900/95 border border-amber-600 rounded px-3 py-1.5 text-sm font-bold text-stone-100 focus:outline-none pointer-events-auto shadow-lg"
                   />
                 ) : (
-                  <div className="flex items-center gap-2 flex-wrap">
+                  <div className="flex items-center gap-2 flex-wrap pr-24 pointer-events-auto">
                     <h4 className="text-base font-serif font-bold text-stone-100 tracking-wide">{selectedDna.name}</h4>
                     {Number(selectedDna.analysisVersion) === 3 ? (
                       <span className="px-1.5 py-0.5 bg-amber-500/15 text-amber-400 border border-amber-500/30 text-[8px] font-bold font-mono uppercase rounded tracking-wider">
@@ -1098,12 +1104,28 @@ const ArtstyleDatabase: React.FC<ArtstyleDatabaseProps> = ({ onBackToGrimoire })
                     )}
                   </div>
                 )}
-                <p className="text-[11px] text-stone-400 italic mt-1 font-medium">"{selectedDna.summary}"</p>
+                {selectedDna.summary && (
+                  <p className="text-[11px] text-stone-400 italic mt-1 font-medium line-clamp-2 pr-2 pointer-events-auto" title={selectedDna.summary}>
+                    "{selectedDna.summary}"
+                  </p>
+                )}
               </div>
             </div>
 
             {/* Content Scrolling Area */}
             <div className="p-5 overflow-y-auto max-h-[50vh] lg:max-h-[55vh] xl:max-h-[60vh] space-y-6 scrollbar-thin">
+              
+              {/* Full Description Card (shown when not editing) */}
+              {!isEditing && selectedDna.summary && (
+                <div className="bg-stone-950/40 rounded-xl p-3.5 border border-stone-800/80 space-y-1.5">
+                  <label className="text-[10px] font-bold text-stone-500 uppercase tracking-widest flex items-center gap-1.5">
+                    <FileText size={12} className="text-amber-500/80" /> Descrição Geral
+                  </label>
+                  <p className="text-[11px] text-stone-300 italic leading-relaxed">
+                    "{selectedDna.summary}"
+                  </p>
+                </div>
+              )}
               
               {/* Tags Section */}
               <div>
@@ -1412,64 +1434,50 @@ const ArtstyleDatabase: React.FC<ArtstyleDatabaseProps> = ({ onBackToGrimoire })
                   Evidência visual e orientação técnica reutilizável por dimensão (0-100%). Não representa beleza da imagem ou relevância temática.
                 </p>
                 <div className="bg-stone-950/40 rounded-xl border border-stone-800 p-4 space-y-3">
-                  {Object.entries(selectedDna.scores || {}).map(([key, score]) => {
-                    const isUnassessed = score === undefined || score === null || typeof score !== 'number' || isNaN(score);
-                    const numScore = isUnassessed ? 0 : Number(score);
-                    const labelPt = key === 'rendering' ? 'renderização' :
-                      key === 'palette' ? 'paleta' :
-                      key === 'details' ? 'detalhes' :
-                      key === 'effects' ? 'efeitos' :
-                      key === 'materials' ? 'materiais' :
-                      key === 'lighting' ? 'iluminação' :
-                      key === 'composition' ? 'composição' :
-                      key === 'pose' ? 'pose & movimento' :
-                      key === 'silhouette' ? 'silhueta' :
-                      key === 'style' ? 'estilo geral' :
-                      key === 'background' ? 'cenário / fundo' :
-                      key === 'detailDensity' ? 'densidade de detalhes' : key;
-                    const justification = selectedDna.scoreJustifications?.[key];
-
-                    return (
-                      <div key={key} className="space-y-1">
-                        <div className="flex justify-between text-[9px] uppercase tracking-wider font-bold">
-                          <span className="text-stone-400">
-                            {labelPt}
-                            {key === 'detailDensity' && (
-                              <span className="ml-1 text-[8px] text-stone-500 font-normal lowercase">(descritor)</span>
-                            )}
-                          </span>
-                          {isUnassessed ? (
-                            <span className="text-stone-600 font-mono text-[8px]">N/A (Não avaliado)</span>
-                          ) : numScore === 0 ? (
-                            <span className="text-stone-500 font-mono">0% (Sem contribuição)</span>
-                          ) : (
-                            <span className="text-amber-500 font-mono">{(numScore * 100).toFixed(0)}%</span>
+                  {getUtilityMatrixPresentationRows(selectedDna.scores, selectedDna.scoreJustifications).map((row) => (
+                    <div key={row.key} className="space-y-1">
+                      <div className="flex justify-between text-[9px] uppercase tracking-wider font-bold">
+                        <span className="text-stone-400">
+                          {row.label}
+                          {row.isDescriptor && (
+                            <span className="ml-1 text-[8px] text-stone-500 font-normal lowercase">(descritor)</span>
                           )}
-                        </div>
-                        <div className="w-full h-1.5 bg-stone-900 rounded-full overflow-hidden">
-                          {isUnassessed ? (
-                            <div className="h-full w-full bg-stone-900/60 border border-dashed border-stone-800 rounded-full" />
-                          ) : (
-                            <div
-                              className={`h-full rounded-full transition-all duration-300 ${
-                                numScore === 0 
-                                  ? 'w-0' 
-                                  : key === 'detailDensity' 
-                                    ? 'bg-gradient-to-r from-amber-900 to-amber-600' 
-                                    : 'bg-gradient-to-r from-amber-800 to-amber-500'
-                              }`}
-                              style={{ width: `${Math.max(0, Math.min(100, numScore * 100))}%` }}
-                            />
-                          )}
-                        </div>
-                        {justification && (
-                          <p className="text-[9px] text-stone-400 italic font-normal line-clamp-2 mt-0.5 pl-1.5 border-l border-amber-900/30">
-                            "{justification}"
-                          </p>
+                        </span>
+                        {row.status === 'unassessed' ? (
+                          <span className="text-stone-600 font-mono text-[8px]">{row.displayText}</span>
+                        ) : row.status === 'invalid' ? (
+                          <span className="text-red-400 font-mono text-[8px]">{row.displayText}</span>
+                        ) : row.status === 'zero_utility' || row.status === 'zero_density' ? (
+                          <span className="text-stone-500 font-mono text-[8px]">{row.displayText}</span>
+                        ) : (
+                          <span className="text-amber-500 font-mono">{row.displayText}</span>
                         )}
                       </div>
-                    );
-                  })}
+                      <div className="w-full h-1.5 bg-stone-900 rounded-full overflow-hidden">
+                        {row.barState === 'unassessed' ? (
+                          <div className="h-full w-full bg-stone-900/60 border border-dashed border-stone-800 rounded-full" />
+                        ) : row.barState === 'invalid' ? (
+                          <div className="h-full w-full bg-red-950/20 border border-dashed border-red-900/40 rounded-full" />
+                        ) : (
+                          <div
+                            className={`h-full rounded-full transition-all duration-300 ${
+                              row.barPercent === 0 
+                                ? 'w-0' 
+                                : row.isDescriptor 
+                                  ? 'bg-gradient-to-r from-amber-900 to-amber-600' 
+                                  : 'bg-gradient-to-r from-amber-800 to-amber-500'
+                            }`}
+                            style={{ width: `${row.barPercent}%` }}
+                          />
+                        )}
+                      </div>
+                      {row.justification && (
+                        <p className="text-[9px] text-stone-400 italic font-normal line-clamp-2 mt-0.5 pl-1.5 border-l border-amber-900/30">
+                          "{row.justification}"
+                        </p>
+                      )}
+                    </div>
+                  ))}
                 </div>
               </div>
 

@@ -90,24 +90,6 @@ export const TECHNICAL_ANALYSIS_FIELDS = [
   'styleAnchors', 'avoidRules'
 ] as const;
 
-export const isCalibratedRecord = (
-  ref: Partial<VisualDNA> | null | undefined
-): boolean => {
-  if (!ref || typeof ref !== 'object') return false;
-  if (ref.isCalibrated !== true) return false;
-  if (typeof ref.calibrationVersion !== 'number' || !SUPPORTED_CALIBRATION_VERSIONS.includes(ref.calibrationVersion as any)) {
-    return false;
-  }
-  if (!ref.scores || typeof ref.scores !== 'object' || Array.isArray(ref.scores)) {
-    return false;
-  }
-  // Must have at least one valid utility dimension evaluated (excluding detailDensity)
-  return UTILITY_DIMENSIONS.some(dim => {
-    const val = (ref.scores as any)[dim];
-    return typeof val === 'number' && Number.isFinite(val) && val >= 0.0 && val <= 1.0;
-  });
-};
-
 export interface AnalysisCompletenessResult {
   isUsable: boolean;
   errors: string[];
@@ -243,6 +225,189 @@ export const validateVisualDNAScores = (
     justifications,
     isCalibrated: errors.length === 0
   };
+};
+
+export const isCalibratedRecord = (
+  ref: Partial<VisualDNA> | null | undefined
+): boolean => {
+  if (!ref || typeof ref !== 'object' || Array.isArray(ref)) return false;
+  if (ref.isCalibrated !== true) return false;
+  if (typeof ref.calibrationVersion !== 'number' || !SUPPORTED_CALIBRATION_VERSIONS.includes(ref.calibrationVersion as any)) {
+    return false;
+  }
+  if (!ref.scores || typeof ref.scores !== 'object' || Array.isArray(ref.scores)) {
+    return false;
+  }
+
+  // Validação numérica existente: nenhum score canônico fornecido pode ser inválido
+  const scoreVal = validateVisualDNAScores(ref.scores);
+  if (!scoreVal.isValid) {
+    return false;
+  }
+
+  // Ao menos uma dimensão de utilidade validamente avaliada (detailDensity sozinho não conta)
+  return UTILITY_DIMENSIONS.some(dim => {
+    const val = (ref.scores as any)[dim];
+    return typeof val === 'number' && Number.isFinite(val) && val >= 0.0 && val <= 1.0;
+  });
+};
+
+export const CANONICAL_DIMENSION_LABELS: Record<typeof ALL_CANONICAL_DIMENSIONS[number], string> = {
+  rendering: 'renderização',
+  composition: 'composição',
+  palette: 'paleta',
+  lighting: 'iluminação',
+  materials: 'materiais',
+  background: 'cenário / fundo',
+  details: 'detalhes',
+  effects: 'efeitos',
+  pose: 'pose & movimento',
+  silhouette: 'silhueta',
+  style: 'estilo geral',
+  detailDensity: 'densidade de detalhes'
+};
+
+export type DimensionPresentationStatus =
+  | 'valid'
+  | 'unassessed'
+  | 'invalid'
+  | 'zero_utility'
+  | 'zero_density';
+
+export interface DimensionPresentation {
+  key: typeof ALL_CANONICAL_DIMENSIONS[number];
+  label: string;
+  isDescriptor: boolean;
+  status: DimensionPresentationStatus;
+  displayText: string;
+  barPercent: number | null;
+  barState: 'normal' | 'zero' | 'unassessed' | 'invalid';
+  justification?: string;
+  rawScore: any;
+}
+
+export const getDimensionPresentation = (
+  dim: typeof ALL_CANONICAL_DIMENSIONS[number],
+  rawScores: any,
+  rawJustifications?: any
+): DimensionPresentation => {
+  const isDescriptor = dim === 'detailDensity';
+  const label = CANONICAL_DIMENSION_LABELS[dim] || dim;
+  const justification = rawJustifications && typeof rawJustifications === 'object' && !Array.isArray(rawJustifications)
+    ? (typeof rawJustifications[dim] === 'string' && rawJustifications[dim].trim() ? rawJustifications[dim].trim() : undefined)
+    : undefined;
+
+  if (!rawScores || typeof rawScores !== 'object' || Array.isArray(rawScores) || !(dim in rawScores)) {
+    return {
+      key: dim,
+      label,
+      isDescriptor,
+      status: 'unassessed',
+      displayText: 'N/A — Não avaliado',
+      barPercent: null,
+      barState: 'unassessed',
+      justification,
+      rawScore: undefined
+    };
+  }
+
+  const val = rawScores[dim];
+
+  if (val === undefined) {
+    return {
+      key: dim,
+      label,
+      isDescriptor,
+      status: 'unassessed',
+      displayText: 'N/A — Não avaliado',
+      barPercent: null,
+      barState: 'unassessed',
+      justification,
+      rawScore: undefined
+    };
+  }
+
+  // Valores presentes, mas inválidos: null, booleanos, strings, objetos, etc.
+  if (val === null || typeof val === 'boolean' || typeof val === 'string' || typeof val !== 'number') {
+    return {
+      key: dim,
+      label,
+      isDescriptor,
+      status: 'invalid',
+      displayText: 'N/A — Valor inválido',
+      barPercent: null,
+      barState: 'invalid',
+      justification,
+      rawScore: val
+    };
+  }
+
+  // Números presentes inválidos: NaN, Infinity, negativos, maiores que 1.0
+  if (isNaN(val) || !Number.isFinite(val) || val < 0.0 || val > 1.0) {
+    return {
+      key: dim,
+      label,
+      isDescriptor,
+      status: 'invalid',
+      displayText: 'N/A — Valor inválido',
+      barPercent: null,
+      barState: 'invalid',
+      justification,
+      rawScore: val
+    };
+  }
+
+  // Zero válido
+  if (val === 0) {
+    if (isDescriptor) {
+      return {
+        key: dim,
+        label,
+        isDescriptor,
+        status: 'zero_density',
+        displayText: '0% — Densidade mínima',
+        barPercent: 0,
+        barState: 'zero',
+        justification,
+        rawScore: val
+      };
+    } else {
+      return {
+        key: dim,
+        label,
+        isDescriptor,
+        status: 'zero_utility',
+        displayText: '0% — Sem contribuição utilizável',
+        barPercent: 0,
+        barState: 'zero',
+        justification,
+        rawScore: val
+      };
+    }
+  }
+
+  // Número finito válido em (0, 1]
+  const pct = Math.round(val * 100);
+  return {
+    key: dim,
+    label,
+    isDescriptor,
+    status: 'valid',
+    displayText: `${pct}%`,
+    barPercent: pct,
+    barState: 'normal',
+    justification,
+    rawScore: val
+  };
+};
+
+export const getUtilityMatrixPresentationRows = (
+  rawScores: any,
+  rawJustifications?: any
+): DimensionPresentation[] => {
+  return ALL_CANONICAL_DIMENSIONS.map(dim =>
+    getDimensionPresentation(dim, rawScores, rawJustifications)
+  );
 };
 
 export const normalizeVisualDNAAnalysis = (parsed: any, originalWarnings: string[] = []): Partial<VisualDNA> => {
@@ -444,7 +609,7 @@ export const normalizeVisualDNAAnalysis = (parsed: any, originalWarnings: string
       normalized.calibrationVersion = parsed.calibrationVersion;
     } else {
       normalized.isCalibrated = false;
-      normalized.calibrationVersion = undefined;
+      delete normalized.calibrationVersion;
     }
     if (!scoreVal.isValid) {
       warnings.push(...scoreVal.errors);
@@ -452,7 +617,7 @@ export const normalizeVisualDNAAnalysis = (parsed: any, originalWarnings: string
   } else {
     normalized.scores = {};
     normalized.isCalibrated = false;
-    normalized.calibrationVersion = undefined;
+    delete normalized.calibrationVersion;
   }
 
   if (parsed.scoreJustifications && typeof parsed.scoreJustifications === 'object') {

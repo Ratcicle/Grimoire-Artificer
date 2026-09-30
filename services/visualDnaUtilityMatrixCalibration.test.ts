@@ -19,7 +19,10 @@ import {
   normalizeVisualDNAAnalysis,
   ALLOWED_VISUAL_TAGS,
   VISUAL_TAG_CATEGORIES,
-  isCalibratedRecord
+  ALL_CANONICAL_DIMENSIONS,
+  isCalibratedRecord,
+  getUtilityMatrixPresentationRows,
+  getDimensionPresentation
 } from "./visualTags";
 import {
   synthesizeVisualDNA,
@@ -762,6 +765,237 @@ describe("GRIMOIRE ARTIFICER — RODADA 3A: Contrato e Calibração da Utility M
       expect(err.usageMetadata?.promptTokenCount).toBe(123);
       expect(err.usageMetadata?.totalTokenCount).toBe(456);
     }
+  });
+
+  // ==================================================
+  // COMPLEMENTO PONTUAL DA RODADA 3A: REGRESSÃO
+  // ==================================================
+
+  // TEST 19: Apresentação Real (Casos A, B, C, D, E)
+  it("19. Presentation Model: 12 canonical dimensions, stable order, N/A distinction, distinct zeros, and explicit invalid state", () => {
+    // Caso A: scores: { rendering: 0.8 } -> 12 dimensões, rendering 80%, outras 11 como N/A — Não avaliado
+    const rowsA = getUtilityMatrixPresentationRows({ rendering: 0.8 });
+    expect(rowsA.length).toBe(12);
+    expect(rowsA.map(r => r.key)).toEqual(ALL_CANONICAL_DIMENSIONS);
+    const renderingRow = rowsA.find(r => r.key === 'rendering')!;
+    expect(renderingRow.status).toBe('valid');
+    expect(renderingRow.displayText).toBe('80%');
+    expect(renderingRow.barPercent).toBe(80);
+    expect(renderingRow.barState).toBe('normal');
+
+    const otherRowsA = rowsA.filter(r => r.key !== 'rendering');
+    expect(otherRowsA.length).toBe(11);
+    otherRowsA.forEach(r => {
+      expect(r.status).toBe('unassessed');
+      expect(r.displayText).toBe('N/A — Não avaliado');
+      expect(r.barPercent).toBeNull();
+      expect(r.barState).toBe('unassessed');
+    });
+
+    // Caso B: scores: {} -> 12 dimensões não avaliadas, sem notas inventadas
+    const rowsB = getUtilityMatrixPresentationRows({});
+    expect(rowsB.length).toBe(12);
+    rowsB.forEach(r => {
+      expect(r.status).toBe('unassessed');
+      expect(r.displayText).toBe('N/A — Não avaliado');
+      expect(r.barPercent).toBeNull();
+      expect(r.barState).toBe('unassessed');
+    });
+
+    // Caso C: rendering: 0 e detailDensity: 0 -> textos diferentes: utilidade zero e densidade mínima
+    const rowsC = getUtilityMatrixPresentationRows({ rendering: 0, detailDensity: 0 });
+    const rendC = rowsC.find(r => r.key === 'rendering')!;
+    expect(rendC.status).toBe('zero_utility');
+    expect(rendC.displayText).toBe('0% — Sem contribuição utilizável');
+    expect(rendC.barPercent).toBe(0);
+    expect(rendC.barState).toBe('zero');
+
+    const densC = rowsC.find(r => r.key === 'detailDensity')!;
+    expect(densC.status).toBe('zero_density');
+    expect(densC.displayText).toBe('0% — Densidade mínima');
+    expect(densC.barPercent).toBe(0);
+    expect(densC.barState).toBe('zero');
+    expect(densC.isDescriptor).toBe(true);
+
+    // Caso D: Valores inválidos presentes: 85, -0.2, Infinity, NaN, "0.8", true, null
+    const invalidScores = {
+      palette: 85,
+      lighting: -0.2,
+      materials: Infinity,
+      background: NaN,
+      details: "0.8",
+      effects: true,
+      pose: null
+    };
+    const rowsD = getUtilityMatrixPresentationRows(invalidScores, {
+      palette: "Justification for invalid score should not validate it"
+    });
+    const paletteRow = rowsD.find(r => r.key === 'palette')!;
+    expect(paletteRow.status).toBe('invalid');
+    expect(paletteRow.displayText).toBe('N/A — Valor inválido');
+    expect(paletteRow.barPercent).toBeNull();
+    expect(paletteRow.barState).toBe('invalid');
+    expect(paletteRow.justification).toBe("Justification for invalid score should not validate it");
+
+    ['lighting', 'materials', 'background', 'details', 'effects', 'pose'].forEach(dim => {
+      const row = rowsD.find(r => r.key === dim)!;
+      expect(row.status).toBe('invalid');
+      expect(row.displayText).toBe('N/A — Valor inválido');
+      expect(row.barPercent).toBeNull();
+      expect(row.barState).toBe('invalid');
+    });
+
+    // Caso E: rendering: 1 -> 100% válido, sem rebaixamento artificial
+    const rowsE = getUtilityMatrixPresentationRows({ rendering: 1 });
+    const rendE = rowsE.find(r => r.key === 'rendering')!;
+    expect(rendE.status).toBe('valid');
+    expect(rendE.displayText).toBe('100%');
+    expect(rendE.barPercent).toBe(100);
+    expect(rendE.barState).toBe('normal');
+  });
+
+  // TEST 20: Calibração - Não certificar registros com scores mistos ou inválidos (Casos F, G, H, I, J)
+  it("20. Calibration Integrity: rejects mixed invalid records (F, G), accepts valid zero (H), rejects insufficient (I), and consumers agree (J)", () => {
+    // Caso F: Marcadores válidos + rendering: 0.8 + palette: 85 -> registro não calibrado
+    const mixedRecordF = createBaseRef("ref-mixed-f", "Mixed F", {
+      scores: {
+        rendering: 0.8,
+        palette: 85
+      },
+      isCalibrated: true,
+      calibrationVersion: 3
+    });
+    expect(isCalibratedRecord(mixedRecordF)).toBe(false);
+
+    // Caso G: Repita com palette: null, "0.8", NaN, Infinity, -0.2, true
+    const invalidPaletteVariants = [null, "0.8", NaN, Infinity, -0.2, true];
+    invalidPaletteVariants.forEach(invalidVal => {
+      const variantRecord = createBaseRef("ref-variant", "Variant", {
+        scores: {
+          rendering: 0.8,
+          palette: invalidVal as any
+        },
+        isCalibrated: true,
+        calibrationVersion: 3
+      });
+      expect(isCalibratedRecord(variantRecord)).toBe(false);
+    });
+
+    // Caso H: Marcadores válidos + rendering: 0, demais dimensões omitidas -> registro calibrado válido
+    const validZeroRecord = createBaseRef("ref-zero-h", "Valid Zero H", {
+      scores: {
+        rendering: 0
+      },
+      isCalibrated: true,
+      calibrationVersion: 3
+    });
+    expect(isCalibratedRecord(validZeroRecord)).toBe(true);
+
+    // Caso I: Somente detailDensity, scores vazio, flag falsa, versão ausente ou versão desconhecida -> não calibrados
+    expect(isCalibratedRecord(createBaseRef("i1", "Only detailDensity", {
+      scores: { detailDensity: 0.8 },
+      isCalibrated: true,
+      calibrationVersion: 3
+    }))).toBe(false);
+
+    expect(isCalibratedRecord(createBaseRef("i2", "Empty scores", {
+      scores: {},
+      isCalibrated: true,
+      calibrationVersion: 3
+    }))).toBe(false);
+
+    expect(isCalibratedRecord(createBaseRef("i3", "False flag", {
+      scores: { rendering: 0.8 },
+      isCalibrated: false,
+      calibrationVersion: 3
+    }))).toBe(false);
+
+    expect(isCalibratedRecord(createBaseRef("i4", "Missing version", {
+      scores: { rendering: 0.8 },
+      isCalibrated: true,
+      calibrationVersion: undefined
+    }))).toBe(false);
+
+    expect(isCalibratedRecord(createBaseRef("i5", "Unknown version", {
+      scores: { rendering: 0.8 },
+      isCalibrated: true,
+      calibrationVersion: 99 as any
+    }))).toBe(false);
+
+    // Caso J: Concordância dos consumidores reais (normalização, getEffectiveUtilityScore)
+    // Para o registro misto da reprodução:
+    // - isCalibratedRecord deve retornar false
+    // - rendering válido deve receber tratamento não calibrado (0.8 * 0.5 = 0.4)
+    // - palette inválido continua recebendo peso defensivo zero (0)
+    expect(getEffectiveUtilityScore(mixedRecordF, "rendering")).toBe(0.4);
+    expect(getEffectiveUtilityScore(mixedRecordF, "palette")).toBe(0);
+
+    const normMixed = normalizeVisualDNAAnalysis(mixedRecordF);
+    expect(normMixed.isCalibrated).toBe(false);
+    expect(Object.hasOwn(normMixed, "calibrationVersion")).toBe(false);
+  });
+
+  // TEST 21: Normalização e Integridade (Casos K, L, M)
+  it("21. Normalization and Metadata Integrity: omits calibrationVersion on legacy/uncalibrated (K), preserves version on calibrated (L), never mutates inputs (M)", () => {
+    // Caso K: Legado normalizado não possui calibrationVersion como propriedade própria
+    const legacyInput = {
+      summary: "Legacy input without calibration",
+      scores: {
+        rendering: 1.0,
+        composition: 1.0
+      },
+      analysisVersion: 3
+    };
+
+    const normLegacy = normalizeVisualDNAAnalysis(legacyInput);
+    expect(normLegacy.isCalibrated).toBe(false);
+    expect(normLegacy.calibrationVersion).toBeUndefined();
+    expect(Object.hasOwn(normLegacy, "calibrationVersion")).toBe(false);
+
+    // Legado que trazia calibrationVersion no input mas não era calibrado
+    const uncalibratedWithVersionProp = {
+      summary: "Inconsistent input",
+      scores: { rendering: 0.8, palette: 85 },
+      isCalibrated: true,
+      calibrationVersion: 3
+    };
+    const normUncalibrated = normalizeVisualDNAAnalysis(uncalibratedWithVersionProp);
+    expect(normUncalibrated.isCalibrated).toBe(false);
+    expect(Object.hasOwn(normUncalibrated, "calibrationVersion")).toBe(false);
+
+    // Caso L: Registro calibrado válido preserva sua versão
+    const validCalibratedInput = {
+      summary: "Properly calibrated input",
+      scores: { rendering: 0.85, composition: 0.75 },
+      isCalibrated: true,
+      calibrationVersion: 3
+    };
+    const normCalibrated = normalizeVisualDNAAnalysis(validCalibratedInput);
+    expect(normCalibrated.isCalibrated).toBe(true);
+    expect(Object.hasOwn(normCalibrated, "calibrationVersion")).toBe(true);
+    expect(normCalibrated.calibrationVersion).toBe(3);
+
+    // Caso M: Entradas originais permanecem idênticas após normalização e apresentação
+    const originalInput = {
+      summary: "Original pristine record",
+      scores: {
+        rendering: 0.8,
+        palette: 85
+      },
+      scoreJustifications: {
+        rendering: "Smooth shading",
+        palette: "Invalid 85"
+      },
+      isCalibrated: true,
+      calibrationVersion: 3
+    };
+
+    const snapshotBefore = JSON.stringify(originalInput);
+    normalizeVisualDNAAnalysis(originalInput);
+    getUtilityMatrixPresentationRows(originalInput.scores, originalInput.scoreJustifications);
+    const snapshotAfter = JSON.stringify(originalInput);
+
+    expect(snapshotBefore).toBe(snapshotAfter);
   });
 });
 
