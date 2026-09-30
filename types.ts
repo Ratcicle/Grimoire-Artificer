@@ -247,3 +247,29 @@ export interface VisualDNA {
 
 export type VisualDNAScores = VisualDNA['scores'];
 
+export interface VisualDNAPatch {
+  raw: any;
+  normalized: Partial<VisualDNA>;
+  presentFields: string[];
+  clearFields?: string[];
+}
+
+export interface SafeMergeDiagnostic {
+  updatedFields: string[];
+  preservedFields: string[];
+  clearedFields: string[];
+  unappliedPartialBlocks: string[];
+  inheritanceWarnings: string[];
+}
+
+export interface SafeMergeResult {
+  data: VisualDNA;
+  changed: boolean;
+  diagnostic: SafeMergeDiagnostic;
+  updatedFields: string[];
+  preservedFields: string[];
+  clearedFields: string[];
+  unappliedPartialBlocks: string[];
+  inheritanceWarnings: string[];
+}
+

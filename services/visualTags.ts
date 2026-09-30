@@ -60,6 +60,21 @@ export const VISUAL_TAG_CATEGORIES: Record<string, string[]> = {
 
 export const ALLOWED_VISUAL_TAGS: string[] = Object.values(VISUAL_TAG_CATEGORIES).flat();
 
+export const getTagCategory = (tag: string): string => {
+  const generic = ['high detail', 'particles', 'strong silhouette', 'dynamic pose'];
+  if (generic.includes(tag)) return "Generic";
+  
+  const coreSubjects = ['humanoid', 'creature', 'dragon', 'machine', 'undead', 'organic horror'];
+  if (coreSubjects.includes(tag)) return "Core Subject";
+
+  for (const [cat, tags] of Object.entries(VISUAL_TAG_CATEGORIES)) {
+    if (tags.includes(tag)) {
+       return cat === "Core" ? "Core" : cat;
+    }
+  }
+  return "Core";
+};
+
 
 export const DEFAULT_VISUAL_DNA_SCORES = {
   style: 0.5, palette: 0.5, pose: 0.5, composition: 0.5, lighting: 0.5, effects: 0.5, materials: 0.5, background: 0.5, details: 0.5, silhouette: 0.5, rendering: 0.5
@@ -575,21 +590,6 @@ export const normalizeVisualDNAAnalysis = (parsed: any, originalWarnings: string
     "Core Subject", "Physical Scale", "Perceived Presence", "Materials", "Elements", "Element Application", "Surface / Finish", "Scale Form", "Scale Cues", "Core", "Generic"
   ];
 
-  const getTagCategory = (tag: string) => {
-    const generic = ['high detail', 'particles', 'strong silhouette', 'dynamic pose'];
-    if (generic.includes(tag)) return "Generic";
-    
-    const coreSubjects = ['humanoid', 'creature', 'dragon', 'machine', 'undead', 'organic horror'];
-    if (coreSubjects.includes(tag)) return "Core Subject";
-
-    for (const [cat, tags] of Object.entries(VISUAL_TAG_CATEGORIES)) {
-      if (tags.includes(tag)) {
-         return cat === "Core" ? "Core" : cat;
-      }
-    }
-    return "Core";
-  };
-
   combinedTags.sort((a, b) => {
     const catA = getTagCategory(a);
     const catB = getTagCategory(b);
@@ -837,27 +837,17 @@ export const VISUAL_TAG_KEYWORDS: Record<string, string[]> = {
   "background phenomenon": ["background phenomenon", "sky effect", "distant phenomenon", "eclipse"]
 };
 
+export {
+  CLEARABLE_ANALYTICAL_FIELDS,
+  PROTECTED_MERGE_FIELDS,
+  createVisualDNAPatch,
+  mergeVisualDNASafe,
+  hasPersistentChanges,
+  extractDerivedTagsFromProfiles
+} from './visualDnaMerge';
+
+import { mergeVisualDNASafe } from './visualDnaMerge';
+
 export const mergeVisualDNA = (base: Partial<VisualDNA>, newAnalysis: Partial<VisualDNA>): VisualDNA => {
-  const merged: any = { ...base };
-
-  const protectedFields = ['id', 'name', 'imageUrl', 'createdAt', 'updatedAt', 'revision'];
-
-  for (const key of Object.keys(newAnalysis)) {
-    if (protectedFields.includes(key)) continue;
-    const val = (newAnalysis as any)[key];
-    if (val !== undefined) {
-      merged[key] = val;
-    }
-  }
-
-  // Ensure core properties are present
-  merged.id = base.id || Date.now().toString();
-  merged.name = base.name || "Unnamed";
-  merged.imageUrl = base.imageUrl || "";
-
-  // Ensure arrays and objects
-  if (!merged.tags) merged.tags = [];
-  if (!merged.scores) merged.scores = { ...DEFAULT_VISUAL_DNA_SCORES };
-
-  return merged as VisualDNA;
+  return mergeVisualDNASafe(base as VisualDNA, newAnalysis).data;
 };

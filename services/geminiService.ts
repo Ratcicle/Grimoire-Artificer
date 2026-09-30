@@ -9,12 +9,18 @@ import {
   MatchingScoreLog, 
   GeneratedCard, 
   VisualDNA,
-  SynthesisDebug
+  SynthesisDebug,
+  VisualDNAPatch
 } from "../types";
 import { getLocalDNA } from "./localDbService";
 import { getAutomaticReferences, getMatchingLogs, resolveManualReferences, synthesizeVisualDNA } from "./visualDnaEngine";
 import { parsePromptIntent } from "./promptParser";
-import { normalizeVisualDNAAnalysis, validateVisualDNAScores, validateAnalysisCompleteness } from "./visualTags";
+import { 
+  normalizeVisualDNAAnalysis, 
+  validateVisualDNAScores, 
+  validateAnalysisCompleteness,
+  createVisualDNAPatch 
+} from "./visualTags";
 import { VISUAL_TAG_CATEGORIES, VISUAL_TAG_KEYWORDS } from "./visualTags";
 import { ARCHETYPE_DEFINITIONS } from "../constants";
 import { GRIMOIRE_SYSTEM_PROMPT } from "../constants";
@@ -84,6 +90,11 @@ export const VISUAL_DNA_RESPONSE_SCHEMA = {
     analysisStatus: { type: Type.STRING, enum: ["complete", "partial", "legacy"] },
     calibrationVersion: { type: Type.NUMBER },
     isCalibrated: { type: Type.BOOLEAN },
+    clearFields: {
+      type: Type.ARRAY,
+      items: { type: Type.STRING },
+      description: "Optional list of analytical field names to clear from existing records during partial reanalysis."
+    },
     subjectProfile: {
       type: Type.OBJECT,
       properties: {
@@ -423,7 +434,7 @@ export const analyzeReferenceImage = async (
   base64Image: string,
   fileName: string,
   modelName: string = "gemini-3.5-flash"
-): Promise<{ data: Partial<VisualDNA>, usageMetadata?: any }> => {
+): Promise<{ data: Partial<VisualDNA>; patch?: VisualDNAPatch; usageMetadata?: any }> => {
   const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
   
   let base64Data = base64Image;
@@ -550,6 +561,13 @@ RECOMMENDED LIMITS PER CATEGORY:
 - Element Application: up to 3 tags
 - Overall Total Max: 14 tags
 
+======================================================================
+6. PARTIAL REANALYSIS & FIELD INTENT
+======================================================================
+- Omit fields that are not evaluated or uncertain;
+- Return [] when an array field was evaluated and contains zero items (empty list);
+- If an optional analytical description previously present should be explicitly removed, list its field name in 'clearFields' (e.g. ['energyDesign']).
+
 CRITICAL: Return ONLY valid JSON. Do NOT wrap in markdown code blocks like \`\`\`json \`\`\`. Start directly with { and end with }. Make sure everything is escaped properly.
   `;
 
@@ -609,7 +627,11 @@ CRITICAL: Return ONLY valid JSON. Do NOT wrap in markdown code blocks like \`\`\
     // 4. Assign local calibration markers ONLY after all validations pass
     parsed.isCalibrated = true;
     parsed.calibrationVersion = 3;
-    return { data: parsed, usageMetadata: response.usageMetadata };
+
+    // 5. Construct patch preserving raw presence alongside normalized representation
+    const patch = createVisualDNAPatch(parsedRaw, parsed);
+
+    return { data: parsed, patch, usageMetadata: response.usageMetadata };
   } catch (err) {
     if (err instanceof GeminiOperationError) {
       throw err;
