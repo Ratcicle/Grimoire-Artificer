@@ -85,15 +85,68 @@ export function hasPersistentChanges(base: any, target: any): boolean {
   if (!base && !target) return false;
   if (!base || !target) return true;
 
-  const sanitize = (obj: any) => {
-    const copy = JSON.parse(JSON.stringify(obj || {}));
-    delete copy.updatedAt;
-    delete copy.createdAt;
-    delete copy.revision;
+  const sanitize = (obj: any): any => {
+    if (obj === null || typeof obj !== 'object') return obj;
+    if (Array.isArray(obj)) return obj.map(sanitize);
+
+    const copy: any = {};
+    for (const key of Object.keys(obj).sort()) {
+      if (['updatedAt', 'createdAt', 'revision', 'usageMetadata', 'warnings'].includes(key)) {
+        continue;
+      }
+      if (obj[key] !== undefined) {
+        copy[key] = sanitize(obj[key]);
+      }
+    }
     return copy;
   };
 
-  return JSON.stringify(sanitize(base)) !== JSON.stringify(sanitize(target));
+  const canonicalStringify = (val: any): string => {
+    if (val === null || typeof val !== 'object') return JSON.stringify(val);
+    if (Array.isArray(val)) {
+      return '[' + val.map(canonicalStringify).join(',') + ']';
+    }
+    const keys = Object.keys(val).sort();
+    return '{' + keys.map(k => JSON.stringify(k) + ':' + canonicalStringify(val[k])).join(',') + '}';
+  };
+
+  return canonicalStringify(sanitize(base)) !== canonicalStringify(sanitize(target));
+}
+
+export function isValidStringArray(val: any): val is string[] {
+  return Array.isArray(val) && val.every((item: any) => typeof item === 'string' && item.trim().length > 0);
+}
+
+export function isCompleteSubjectProfile(rawSP: any): boolean {
+  if (!rawSP || typeof rawSP !== 'object' || Array.isArray(rawSP)) return false;
+  const hasPrimary = typeof rawSP.primarySubject === 'string' && rawSP.primarySubject.trim().length > 0;
+  const hasCategory = typeof rawSP.subjectCategory === 'string' && rawSP.subjectCategory.trim().length > 0;
+  const hasRole = typeof rawSP.visualRole === 'string' && rawSP.visualRole.trim().length > 0;
+  return hasPrimary && hasCategory && hasRole;
+}
+
+export function isCompleteScaleProfile(rawSP: any): boolean {
+  if (!rawSP || typeof rawSP !== 'object' || Array.isArray(rawSP)) return false;
+  const hasScale = typeof rawSP.physicalScale === 'string' && rawSP.physicalScale.trim().length > 0;
+  const hasPresence = typeof rawSP.perceivedPresence === 'string' && rawSP.perceivedPresence.trim().length > 0;
+  const hasForms = isValidStringArray(rawSP.scaleForms);
+  const hasCues = isValidStringArray(rawSP.scaleCues);
+  const hasEvidence = typeof rawSP.evidence === 'string' && rawSP.evidence.trim().length > 0;
+  const hasConfidence = typeof rawSP.confidence === 'number' && Number.isFinite(rawSP.confidence) && rawSP.confidence >= 0 && rawSP.confidence <= 1;
+
+  return hasScale && hasPresence && hasForms && hasCues && hasEvidence && hasConfidence;
+}
+
+export function isCompleteSubstanceProfile(rawSP: any): boolean {
+  if (!rawSP || typeof rawSP !== 'object' || Array.isArray(rawSP)) return false;
+  const hasMaterials = isValidStringArray(rawSP.materials);
+  const hasSurfaces = isValidStringArray(rawSP.surfaces);
+  const hasElements = isValidStringArray(rawSP.elements);
+  const hasElementApplications = isValidStringArray(rawSP.elementApplications);
+  const hasEvidence = typeof rawSP.evidence === 'string' && rawSP.evidence.trim().length > 0;
+  const hasConfidence = typeof rawSP.confidence === 'number' && Number.isFinite(rawSP.confidence) && rawSP.confidence >= 0 && rawSP.confidence <= 1;
+
+  return hasMaterials && hasSurfaces && hasElements && hasElementApplications && hasEvidence && hasConfidence;
 }
 
 export function createVisualDNAPatch(raw: any, normalized?: Partial<VisualDNA>): VisualDNAPatch {
@@ -261,30 +314,25 @@ export function mergeVisualDNASafe(
     clearedFields.push('subjectProfile');
   } else if ('subjectProfile' in patch.raw) {
     const rawSP = patch.raw.subjectProfile;
-    if (rawSP && typeof rawSP === 'object' && !Array.isArray(rawSP)) {
-      const hasPrimary = typeof rawSP.primarySubject === 'string' && rawSP.primarySubject.trim().length > 0;
-      const hasCategory = typeof rawSP.subjectCategory === 'string' && rawSP.subjectCategory.trim().length > 0;
-      if (hasPrimary && hasCategory) {
-        merged.subjectProfile = {
-          primarySubject: rawSP.primarySubject.trim().replace(/\s+/g, ' '),
-          subjectCategory: rawSP.subjectCategory.trim().toLowerCase().replace(/\s+/g, ' '),
-          visualRole: typeof rawSP.visualRole === 'string' && rawSP.visualRole.trim().length > 0
-            ? rawSP.visualRole.trim().toLowerCase()
-            : 'primary'
-        };
-        updatedFields.push('subjectProfile');
-      } else {
-        // Incomplete block: preserve previous profile
-        if (base?.subjectProfile) {
-          merged.subjectProfile = { ...base.subjectProfile };
-        } else {
-          delete merged.subjectProfile;
-        }
-        unappliedPartialBlocks.push('subjectProfile: proposta incompleta (necessita de primarySubject e subjectCategory)');
-        preservedFields.push('subjectProfile');
-      }
+    if (rawSP === null || typeof rawSP !== 'object' || Array.isArray(rawSP)) {
+      throw new Error(`Tipo incompatível para subjectProfile: esperado objeto, recebido ${rawSP === null ? 'null' : Array.isArray(rawSP) ? 'array' : typeof rawSP}.`);
+    }
+    if (isCompleteSubjectProfile(rawSP)) {
+      merged.subjectProfile = {
+        primarySubject: rawSP.primarySubject.trim().replace(/\s+/g, ' '),
+        subjectCategory: rawSP.subjectCategory.trim().toLowerCase().replace(/\s+/g, ' '),
+        visualRole: rawSP.visualRole.trim().toLowerCase()
+      };
+      updatedFields.push('subjectProfile');
     } else {
-      throw new Error(`Tipo incompatível para subjectProfile: esperado objeto, recebido ${typeof rawSP}.`);
+      // Incomplete block: preserve previous profile
+      if (base?.subjectProfile) {
+        merged.subjectProfile = { ...base.subjectProfile };
+      } else {
+        delete merged.subjectProfile;
+      }
+      unappliedPartialBlocks.push('subjectProfile: proposta incompleta (exige primarySubject, subjectCategory e visualRole)');
+      preservedFields.push('subjectProfile');
     }
   } else {
     if (base?.subjectProfile) {
@@ -301,26 +349,27 @@ export function mergeVisualDNASafe(
     clearedFields.push('scaleProfile');
   } else if ('scaleProfile' in patch.raw) {
     const rawSP = patch.raw.scaleProfile;
-    if (rawSP && typeof rawSP === 'object' && !Array.isArray(rawSP)) {
-      const hasScale = typeof rawSP.physicalScale === 'string' && rawSP.physicalScale.trim().length > 0;
-      const hasPresence = typeof rawSP.perceivedPresence === 'string' && rawSP.perceivedPresence.trim().length > 0;
-      const validConf = rawSP.confidence === undefined || (typeof rawSP.confidence === 'number' && !isNaN(rawSP.confidence));
-      if ((hasScale || hasPresence) && validConf) {
-        merged.scaleProfile = patch.normalized?.scaleProfile
-          ? { ...patch.normalized.scaleProfile }
-          : { ...rawSP };
-        updatedFields.push('scaleProfile');
-      } else {
-        if (base?.scaleProfile) {
-          merged.scaleProfile = { ...base.scaleProfile };
-        } else {
-          delete merged.scaleProfile;
-        }
-        unappliedPartialBlocks.push('scaleProfile: proposta incompleta (necessita de physicalScale ou perceivedPresence)');
-        preservedFields.push('scaleProfile');
-      }
+    if (rawSP === null || typeof rawSP !== 'object' || Array.isArray(rawSP)) {
+      throw new Error(`Tipo incompatível para scaleProfile: esperado objeto, recebido ${rawSP === null ? 'null' : Array.isArray(rawSP) ? 'array' : typeof rawSP}.`);
+    }
+    if (isCompleteScaleProfile(rawSP)) {
+      merged.scaleProfile = {
+        physicalScale: rawSP.physicalScale.trim().toLowerCase(),
+        perceivedPresence: rawSP.perceivedPresence.trim().toLowerCase(),
+        scaleForms: rawSP.scaleForms.map((f: string) => f.trim().toLowerCase()),
+        scaleCues: rawSP.scaleCues.map((c: string) => c.trim().toLowerCase()),
+        evidence: rawSP.evidence.trim().replace(/\s+/g, ' '),
+        confidence: rawSP.confidence
+      };
+      updatedFields.push('scaleProfile');
     } else {
-      throw new Error(`Tipo incompatível para scaleProfile: esperado objeto, recebido ${typeof rawSP}.`);
+      if (base?.scaleProfile) {
+        merged.scaleProfile = { ...base.scaleProfile };
+      } else {
+        delete merged.scaleProfile;
+      }
+      unappliedPartialBlocks.push('scaleProfile: proposta incompleta (exige physicalScale, perceivedPresence, scaleForms, scaleCues, evidence e confidence)');
+      preservedFields.push('scaleProfile');
     }
   } else {
     if (base?.scaleProfile) {
@@ -337,26 +386,27 @@ export function mergeVisualDNASafe(
     clearedFields.push('substanceProfile');
   } else if ('substanceProfile' in patch.raw) {
     const rawSP = patch.raw.substanceProfile;
-    if (rawSP && typeof rawSP === 'object' && !Array.isArray(rawSP)) {
-      const hasMaterials = Array.isArray(rawSP.materials);
-      const hasSurfaces = Array.isArray(rawSP.surfaces);
-      const validConf = rawSP.confidence === undefined || (typeof rawSP.confidence === 'number' && !isNaN(rawSP.confidence));
-      if ((hasMaterials || hasSurfaces) && validConf) {
-        merged.substanceProfile = patch.normalized?.substanceProfile
-          ? { ...patch.normalized.substanceProfile }
-          : { ...rawSP };
-        updatedFields.push('substanceProfile');
-      } else {
-        if (base?.substanceProfile) {
-          merged.substanceProfile = { ...base.substanceProfile };
-        } else {
-          delete merged.substanceProfile;
-        }
-        unappliedPartialBlocks.push('substanceProfile: proposta incompleta (necessita de array de materials ou surfaces)');
-        preservedFields.push('substanceProfile');
-      }
+    if (rawSP === null || typeof rawSP !== 'object' || Array.isArray(rawSP)) {
+      throw new Error(`Tipo incompatível para substanceProfile: esperado objeto, recebido ${rawSP === null ? 'null' : Array.isArray(rawSP) ? 'array' : typeof rawSP}.`);
+    }
+    if (isCompleteSubstanceProfile(rawSP)) {
+      merged.substanceProfile = {
+        materials: rawSP.materials.map((m: string) => m.trim().toLowerCase()),
+        surfaces: rawSP.surfaces.map((s: string) => s.trim().toLowerCase()),
+        elements: rawSP.elements.map((e: string) => e.trim().toLowerCase()),
+        elementApplications: rawSP.elementApplications.map((ea: string) => ea.trim().toLowerCase()),
+        evidence: rawSP.evidence.trim().replace(/\s+/g, ' '),
+        confidence: rawSP.confidence
+      };
+      updatedFields.push('substanceProfile');
     } else {
-      throw new Error(`Tipo incompatível para substanceProfile: esperado objeto, recebido ${typeof rawSP}.`);
+      if (base?.substanceProfile) {
+        merged.substanceProfile = { ...base.substanceProfile };
+      } else {
+        delete merged.substanceProfile;
+      }
+      unappliedPartialBlocks.push('substanceProfile: proposta incompleta (exige materials, surfaces, elements, elementApplications, evidence e confidence)');
+      preservedFields.push('substanceProfile');
     }
   } else {
     if (base?.substanceProfile) {
@@ -411,19 +461,17 @@ export function mergeVisualDNASafe(
   }
 
   // Prevent scaleRelationships pointing to deleted subjects
-  if (
-    merged.subjects &&
-    Array.isArray(merged.subjects) &&
-    merged.subjects.length > 0 &&
-    merged.scaleRelationships &&
-    Array.isArray(merged.scaleRelationships)
-  ) {
-    const validSubjectIds = new Set(merged.subjects.map((s: any) => s.id));
-    merged.scaleRelationships = merged.scaleRelationships.filter(
-      (rel: any) => validSubjectIds.has(rel.subjectA) && validSubjectIds.has(rel.subjectB)
-    );
-    if (merged.scaleRelationships.length === 0) {
+  if (merged.scaleRelationships && Array.isArray(merged.scaleRelationships)) {
+    if (!merged.subjects || !Array.isArray(merged.subjects) || merged.subjects.length === 0) {
       delete merged.scaleRelationships;
+    } else {
+      const validSubjectIds = new Set(merged.subjects.map((s: any) => s.id));
+      merged.scaleRelationships = merged.scaleRelationships.filter(
+        (rel: any) => validSubjectIds.has(rel.subjectA) && validSubjectIds.has(rel.subjectB)
+      );
+      if (merged.scaleRelationships.length === 0) {
+        delete merged.scaleRelationships;
+      }
     }
   }
 

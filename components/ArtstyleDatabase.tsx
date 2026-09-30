@@ -14,7 +14,7 @@ import {
 } from "../services/cloudDnaService";
 import { getLocalDNA, saveTokenLog } from "../services/localDbService";
 import { analyzeReferenceImage, checkApiKey, promptApiKeySelection, extractUsageFromError, mapUsageMetadata } from "../services/geminiService";
-import { mergeVisualDNA, mergeVisualDNASafe } from "../services/visualTags";
+import { mergeVisualDNA, mergeVisualDNASafe, hasPersistentChanges } from "../services/visualTags";
 import { compressImage } from "../services/imageUtils";
 import { auth, provider, signInWithPopup, signOut, onAuthStateChanged, User } from "../services/firebase";
 import { 
@@ -252,16 +252,26 @@ const ArtstyleDatabase: React.FC<ArtstyleDatabaseProps> = ({ onBackToGrimoire })
 
     const startTime = Date.now();
     try {
-      // Check if existing record exists in local DB
+      // Check if existing record exists in local DB BEFORE calling model
       const existingList = await getLocalDNA();
       const existingRecord = existingList.find(d => d.id === itemId);
       const isReanalysis = item.operationType === 'reanalyze' || !!existingRecord;
 
+      if (item.operationType === 'reanalyze' && !existingRecord) {
+        console.warn(`Registro ${itemId} a ser reanalisado não existe no banco local.`);
+        setUploadQueue(prev => prev.filter(i => i.id !== itemId));
+        return;
+      }
+
+      // Independent deterministic snapshot before initiating call to model
+      const baseSnapshot: VisualDNA | undefined = existingRecord ? JSON.parse(JSON.stringify(existingRecord)) : undefined;
+
       const result = await analyzeReferenceImage(item.base64, item.name, analysisModel);
       
       let finalDna: VisualDNA;
+      let persistedRecord: VisualDNA;
 
-      if (isReanalysis) {
+      if (isReanalysis && baseSnapshot) {
         const currentList = await getLocalDNA();
         const currentDna = currentList.find(d => d.id === itemId);
         if (!currentDna) {
@@ -270,11 +280,19 @@ const ArtstyleDatabase: React.FC<ArtstyleDatabaseProps> = ({ onBackToGrimoire })
           return;
         }
 
-        if (
-          existingRecord &&
-          ((existingRecord.revision !== undefined && currentDna.revision !== existingRecord.revision) ||
-           (existingRecord.updatedAt !== undefined && currentDna.updatedAt !== existingRecord.updatedAt))
-        ) {
+        const revisionConflict =
+          baseSnapshot.revision !== undefined &&
+          currentDna.revision !== undefined &&
+          currentDna.revision !== baseSnapshot.revision;
+
+        const updatedConflict =
+          baseSnapshot.updatedAt !== undefined &&
+          currentDna.updatedAt !== undefined &&
+          currentDna.updatedAt !== baseSnapshot.updatedAt;
+
+        const contentConflict = hasPersistentChanges(baseSnapshot, currentDna);
+
+        if (revisionConflict || updatedConflict || contentConflict) {
           console.warn(`Conflito: registro ${itemId} foi modificado durante a análise.`);
           setUploadQueue(prev => prev.map(i => i.id === itemId ? { ...i, status: 'failed', error: 'Registro alterado durante análise.' } : i));
           return;
@@ -283,7 +301,9 @@ const ArtstyleDatabase: React.FC<ArtstyleDatabaseProps> = ({ onBackToGrimoire })
         const mergeResult = mergeVisualDNASafe(currentDna, result.patch || result.data);
         finalDna = mergeResult.data;
         if (mergeResult.changed) {
-          await saveDNA(finalDna);
+          persistedRecord = await saveDNA(finalDna);
+        } else {
+          persistedRecord = currentDna;
         }
       } else {
         finalDna = mergeVisualDNA({
@@ -291,7 +311,7 @@ const ArtstyleDatabase: React.FC<ArtstyleDatabaseProps> = ({ onBackToGrimoire })
           name: item.name,
           imageUrl: item.base64
         }, result.data);
-        await saveDNA(finalDna);
+        persistedRecord = await saveDNA(finalDna);
       }
 
       setUploadQueue(prev => prev.map(i => i.id === itemId ? { ...i, status: 'done' } : i));
@@ -300,8 +320,9 @@ const ArtstyleDatabase: React.FC<ArtstyleDatabaseProps> = ({ onBackToGrimoire })
       const updatedList = await getLocalDNA();
       setDnaList(updatedList);
 
-      // Automatically select if it was the only one (non-stale update helper)
-      setSelectedDna(prev => prev?.id === finalDna.id ? finalDna : (prev || finalDna));
+      // Automatically select if it was the only one (non-stale update helper with persisted record)
+      const finalSelected = updatedList.find(d => d.id === itemId) || persistedRecord;
+      setSelectedDna(prev => prev?.id === itemId ? finalSelected : (prev || finalSelected));
 
       // Log usage
       const durationMs = Date.now() - startTime;
@@ -399,13 +420,27 @@ const ArtstyleDatabase: React.FC<ArtstyleDatabaseProps> = ({ onBackToGrimoire })
     }
     
     setReanalyzingConfirmId(null);
+
+    // 1. Read current local record BEFORE initiating call to model
+    const localList = await getLocalDNA();
+    const snapshotRecord = localList.find(d => d.id === dna.id);
+    if (!snapshotRecord) {
+      console.warn(`Registro "${dna.name}" não foi encontrado no banco local.`);
+      setSyncStatusMsg(`Registro "${dna.name}" não encontrado.`);
+      setTimeout(() => setSyncStatusMsg(""), 4000);
+      return;
+    }
+
+    // Independent snapshot of current local record
+    const baseSnapshot: VisualDNA = JSON.parse(JSON.stringify(snapshotRecord));
+
     analyzingIdsRef.current.add(dna.id);
     setReanalyzingIds(prev => {
       const next = new Set(prev);
       next.add(dna.id);
       return next;
     });
-    setSyncStatusMsg(`Reanalisando "${dna.name}"... Extraindo DNA visual com IA...`);
+    setSyncStatusMsg(`Reanalisando "${baseSnapshot.name}"... Extraindo DNA visual com IA...`);
 
     // Add to upload queue as analyzing
     const queueId = dna.id;
@@ -413,8 +448,8 @@ const ArtstyleDatabase: React.FC<ArtstyleDatabaseProps> = ({ onBackToGrimoire })
       ...prev,
       {
         id: queueId,
-        name: dna.name,
-        base64: dna.imageUrl,
+        name: baseSnapshot.name,
+        base64: baseSnapshot.imageUrl,
         status: 'analyzing',
         operationType: 'reanalyze'
       }
@@ -422,25 +457,34 @@ const ArtstyleDatabase: React.FC<ArtstyleDatabaseProps> = ({ onBackToGrimoire })
 
     const startTime = Date.now();
     try {
-      const result = await analyzeReferenceImage(dna.imageUrl, dna.name, analysisModel);
+      const result = await analyzeReferenceImage(baseSnapshot.imageUrl, baseSnapshot.name, analysisModel);
 
-      // Verify local record state before saving
+      // Verify local record state after receiving response
       const currentList = await getLocalDNA();
-      const currentDna = currentList.find(d => d.id === dna.id);
+      const currentDna = currentList.find(d => d.id === queueId);
       if (!currentDna) {
-        console.warn(`Registro "${dna.name}" foi excluído durante a reanálise; não recriando.`);
-        setSyncStatusMsg(`Registro "${dna.name}" foi excluído durante a reanálise.`);
+        console.warn(`Registro "${baseSnapshot.name}" foi excluído durante a reanálise; não recriando.`);
+        setSyncStatusMsg(`Registro "${baseSnapshot.name}" foi excluído durante a reanálise.`);
         setTimeout(() => setSyncStatusMsg(""), 5000);
         setUploadQueue(prev => prev.filter(i => i.id !== queueId));
         return;
       }
 
-      // Check conflict: if revision or updatedAt changed while analysis was running
-      if (
-        (dna.revision !== undefined && currentDna.revision !== undefined && currentDna.revision !== dna.revision) ||
-        (dna.updatedAt !== undefined && currentDna.updatedAt !== undefined && currentDna.updatedAt !== dna.updatedAt)
-      ) {
-        console.warn(`Conflito: registro "${dna.name}" foi modificado durante a reanálise.`);
+      // Check conflict against baseSnapshot (works for both metadata-enabled and legacy records)
+      const revisionConflict =
+        baseSnapshot.revision !== undefined &&
+        currentDna.revision !== undefined &&
+        currentDna.revision !== baseSnapshot.revision;
+
+      const updatedConflict =
+        baseSnapshot.updatedAt !== undefined &&
+        currentDna.updatedAt !== undefined &&
+        currentDna.updatedAt !== baseSnapshot.updatedAt;
+
+      const contentConflict = hasPersistentChanges(baseSnapshot, currentDna);
+
+      if (revisionConflict || updatedConflict || contentConflict) {
+        console.warn(`Conflito: registro "${currentDna.name}" foi modificado durante a reanálise.`);
         setSyncStatusMsg(`Conflito: registro "${currentDna.name}" foi alterado durante a reanálise. Atualização descartada.`);
         setTimeout(() => setSyncStatusMsg(""), 6000);
         setUploadQueue(prev => prev.map(i => i.id === queueId ? { ...i, status: 'failed', error: 'Registro alterado durante reanálise.' } : i));
@@ -450,24 +494,26 @@ const ArtstyleDatabase: React.FC<ArtstyleDatabaseProps> = ({ onBackToGrimoire })
       const mergeResult = mergeVisualDNASafe(currentDna, result.patch || result.data);
       const updatedDna = mergeResult.data;
 
+      let persistedRecord = currentDna;
       if (mergeResult.changed) {
-        await saveDNA(updatedDna);
+        persistedRecord = await saveDNA(updatedDna);
       }
 
       setUploadQueue(prev => prev.filter(i => i.id !== queueId));
       
-      // Reload list
+      // Reload list and set selection to the effectively persisted record
       const allDna = await getLocalDNA();
       setDnaList(allDna);
-      setSelectedDna(updatedDna);
+      const selectedRecord = allDna.find(d => d.id === queueId) || persistedRecord;
+      setSelectedDna(selectedRecord);
 
       if (mergeResult.changed) {
         const detailStr = mergeResult.clearedFields.length > 0
           ? ` (${mergeResult.updatedFields.length} campos atualizados, ${mergeResult.clearedFields.length} limpos)`
           : ` (${mergeResult.updatedFields.length} campos atualizados)`;
-        setSyncStatusMsg(`Reanálise concluída com sucesso para "${updatedDna.name}"!${detailStr}`);
+        setSyncStatusMsg(`Reanálise concluída com sucesso para "${selectedRecord.name}"!${detailStr}`);
       } else {
-        setSyncStatusMsg(`Reanálise concluída para "${updatedDna.name}" (dados mantidos sem alterações).`);
+        setSyncStatusMsg(`Reanálise concluída para "${selectedRecord.name}" (dados mantidos sem alterações).`);
       }
       setTimeout(() => setSyncStatusMsg(""), 5000);
 
@@ -542,9 +588,9 @@ const ArtstyleDatabase: React.FC<ArtstyleDatabaseProps> = ({ onBackToGrimoire })
     };
 
     try {
-      await saveDNA(updatedDna);
-      setSelectedDna(updatedDna);
-      setDnaList(prev => prev.map(item => item.id === selectedDna.id ? updatedDna : item));
+      const persisted = await saveDNA(updatedDna);
+      setSelectedDna(persisted);
+      setDnaList(prev => prev.map(item => item.id === selectedDna.id ? persisted : item));
       setIsEditing(false);
       setDuplicateWarning([]);
     } catch (err) {

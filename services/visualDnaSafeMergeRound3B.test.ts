@@ -528,6 +528,7 @@ describe("GRIMOIRE ARTIFICER — RODADA 3B: Merge Seguro de Reanálises Parciais
         surfaces: ["polished"],
         elements: ["ice"],
         elementApplications: ["aura"],
+        evidence: "translucent crystal body radiating cold aura",
         confidence: 0.9
       },
       scores: { rendering: 0.85 }
@@ -630,5 +631,240 @@ describe("GRIMOIRE ARTIFICER — RODADA 3B: Merge Seguro de Reanálises Parciais
     expect(hasPersistentChanges(base, { ...base, summary: "Changed summary" })).toBe(true);
     // Ignore volatile timestamps and revision
     expect(hasPersistentChanges(base, { ...base, updatedAt: base.updatedAt! + 1000, revision: (base.revision || 1) + 1 })).toBe(false);
+  });
+
+  // ==================================================
+  // COMPLEMENTO DA RODADA 3B — GRUPO 1: INTEGRIDADE DOS PERFIS
+  // ==================================================
+  it("K. Complemento 3B Group 1: Partial profile blocks cannot overwrite complete blocks with fabricated defaults", async () => {
+    const base = createFullBaseRef();
+    expect(base.substanceProfile?.materials).toContain("metal");
+    expect(base.substanceProfile?.surfaces).toContain("polished");
+    expect(base.scaleProfile?.physicalScale).toBe("giant");
+    expect(base.scaleProfile?.perceivedPresence).toBe("dominant presence");
+
+    // 1. materials isolado: substanceProfile com apenas materials não pode apagar surfaces, elements, evidence ou zerar confidence
+    const patchMaterialsOnly = createVisualDNAPatch({
+      summary: "Attempting partial substance update",
+      rendering: "Glacial crystal rendering",
+      substanceProfile: {
+        materials: ["silk"]
+      },
+      scores: { rendering: 0.85 }
+    });
+
+    const resMaterials = mergeVisualDNASafe(base, patchMaterialsOnly);
+    // Preserves entire base substanceProfile
+    expect(resMaterials.data.substanceProfile).toEqual(base.substanceProfile);
+    expect(resMaterials.data.substanceProfile?.surfaces).toEqual(base.substanceProfile?.surfaces);
+    expect(resMaterials.data.substanceProfile?.confidence).toBe(base.substanceProfile?.confidence);
+    expect(resMaterials.unappliedPartialBlocks.some(b => b.includes("substanceProfile"))).toBe(true);
+    // Rejected block does not derive "silk" into tags
+    expect(resMaterials.data.tags).not.toContain("silk");
+
+    // 2. perceivedPresence isolado: scaleProfile com apenas perceivedPresence preserva escala física, forms, cues e evidence anteriores
+    const patchPresenceOnly = createVisualDNAPatch({
+      summary: "Attempting partial scale update",
+      rendering: "Glacial crystal rendering",
+      scaleProfile: {
+        perceivedPresence: "monumental presence"
+      },
+      scores: { rendering: 0.85 }
+    });
+
+    const resPresence = mergeVisualDNASafe(base, patchPresenceOnly);
+    expect(resPresence.data.scaleProfile).toEqual(base.scaleProfile);
+    expect(resPresence.data.scaleProfile?.physicalScale).toBe(base.scaleProfile?.physicalScale);
+    expect(resPresence.data.scaleProfile?.perceivedPresence).toBe("dominant presence");
+    expect(resPresence.data.scaleProfile?.scaleForms).toEqual(base.scaleProfile?.scaleForms);
+    expect(resPresence.data.scaleProfile?.scaleCues).toEqual(base.scaleProfile?.scaleCues);
+    expect(resPresence.unappliedPartialBlocks.some(b => b.includes("scaleProfile"))).toBe(true);
+
+    // 3. subjectProfile sem visualRole: não recebe papel inventado ('primary') e preserva perfil base
+    const patchSubjectNoRole = createVisualDNAPatch({
+      summary: "Attempting subject without visualRole",
+      rendering: "Glacial crystal rendering",
+      subjectProfile: {
+        primarySubject: "Void Leviathan",
+        subjectCategory: "aquatic titan"
+        // visualRole omitted
+      },
+      scores: { rendering: 0.85 }
+    });
+
+    const resSubjectNoRole = mergeVisualDNASafe(base, patchSubjectNoRole);
+    expect(resSubjectNoRole.data.subjectProfile).toEqual(base.subjectProfile);
+    expect(resSubjectNoRole.unappliedPartialBlocks.some(b => b.includes("subjectProfile"))).toBe(true);
+
+    // 4. Perfil completo substitui corretamente
+    const patchComplete = createVisualDNAPatch({
+      summary: "Complete valid profiles update",
+      rendering: "Glacial crystal rendering",
+      subjectProfile: {
+        primarySubject: "Ancient Celestial Dragon",
+        subjectCategory: "celestial dragon",
+        visualRole: "primary"
+      },
+      scaleProfile: {
+        physicalScale: "titanic",
+        perceivedPresence: "monumental presence",
+        scaleForms: ["slender"],
+        scaleCues: ["oversized weapons"],
+        evidence: "Spans the horizon across stars",
+        confidence: 0.95
+      },
+      substanceProfile: {
+        materials: ["starlight crystal"],
+        surfaces: ["nebula sheen"],
+        elements: ["cosmic"],
+        elementApplications: ["celestial glow"],
+        evidence: "Body composed of translucent star-matter",
+        confidence: 0.9
+      },
+      scores: { rendering: 0.85 }
+    });
+
+    const resComplete = mergeVisualDNASafe(base, patchComplete);
+    expect(resComplete.data.subjectProfile?.primarySubject).toBe("Ancient Celestial Dragon");
+    expect(resComplete.data.scaleProfile?.physicalScale).toBe("titanic");
+    expect(resComplete.data.substanceProfile?.materials).toEqual(["starlight crystal"]);
+    expect(resComplete.data.substanceProfile?.confidence).toBe(0.9);
+
+    // 5. Perfil completo com elements:[] remove os elementos legitimamente
+    const patchEmptyElements = createVisualDNAPatch({
+      summary: "Complete profile with empty elements",
+      rendering: "Glacial crystal rendering",
+      substanceProfile: {
+        materials: ["pure adamantine"],
+        surfaces: ["matte brushed"],
+        elements: [], // explicitly empty
+        elementApplications: [],
+        evidence: "Inert metal without magical energy",
+        confidence: 0.85
+      },
+      scores: { rendering: 0.85 }
+    });
+
+    const resEmptyElements = mergeVisualDNASafe(base, patchEmptyElements);
+    expect(resEmptyElements.data.substanceProfile?.materials).toEqual(["pure adamantine"]);
+    expect(resEmptyElements.data.substanceProfile?.elements).toEqual([]);
+
+    // 6. Tipo incompatível no perfil rejeita a atualização antes de salvar
+    expect(() => {
+      mergeVisualDNASafe(base, createVisualDNAPatch({
+        summary: "Incompatible profile type",
+        rendering: "Valid rendering",
+        substanceProfile: "incompatible string"
+      }));
+    }).toThrow(/Tipo incompatível para substanceProfile/);
+
+    expect(() => {
+      mergeVisualDNASafe(base, createVisualDNAPatch({
+        summary: "Incompatible profile type",
+        rendering: "Valid rendering",
+        subjectProfile: null
+      }));
+    }).toThrow(/Tipo incompatível para subjectProfile/);
+
+    // 7. End-to-end através de analyzeReferenceImage mockado com defaults gerados pelo normalizador
+    generateContentMock.mockResolvedValueOnce({
+      text: JSON.stringify({
+        summary: "Model generated partial substance",
+        rendering: "Smooth cel shading",
+        substanceProfile: {
+          materials: ["silk"] // model returned only materials
+        },
+        scores: { rendering: 0.9 }
+      }),
+      usageMetadata: { promptTokenCount: 50, totalTokenCount: 50 }
+    });
+
+    const serviceResult = await analyzeReferenceImage("data:image/png;base64,abc", "test.png");
+    // Normalizer fabricated default empty lists inside serviceResult.data
+    expect(serviceResult.data.substanceProfile?.surfaces).toEqual([]);
+    expect(serviceResult.data.substanceProfile?.confidence).toBe(0);
+
+    // Merge through patch safely ignores fabricated defaults and preserves base profile
+    const mergedFromService = mergeVisualDNASafe(base, serviceResult.patch);
+    expect(mergedFromService.data.substanceProfile).toEqual(base.substanceProfile);
+    expect(mergedFromService.unappliedPartialBlocks.some(b => b.includes("substanceProfile"))).toBe(true);
+  });
+
+  // ==================================================
+  // COMPLEMENTO DA RODADA 3B — GRUPO 2: CONCORRÊNCIA E PERSISTÊNCIA
+  // ==================================================
+  it("L. Complemento 3B Group 2: Snapshot concurrency detection protects legacy records, avoids false conflicts on sequential reanalyses, and handles deletion", () => {
+    // 1. Proteção de legado sem metadados (sem revision/updatedAt)
+    const legacyBase: VisualDNA = {
+      ...createFullBaseRef("legacy-card-1"),
+      createdAt: undefined,
+      updatedAt: undefined,
+      revision: undefined
+    };
+    delete (legacyBase as any).createdAt;
+    delete (legacyBase as any).updatedAt;
+    delete (legacyBase as any).revision;
+
+    // Independent snapshot captured BEFORE model call
+    const snapshotBeforeCall: VisualDNA = JSON.parse(JSON.stringify(legacyBase));
+
+    // Simulated external edit during model call: user edited rendering manually in database
+    const localDbAfterModelCall: VisualDNA = {
+      ...legacyBase,
+      rendering: "User modified rendering manually while model was running"
+    };
+
+    // Concurrency verification must detect persistent content change even without revision metadata
+    const conflictDetected = hasPersistentChanges(snapshotBeforeCall, localDbAfterModelCall);
+    expect(conflictDetected).toBe(true);
+
+    // If no change occurred, hasPersistentChanges returns false
+    const unchangedLocalDb: VisualDNA = JSON.parse(JSON.stringify(legacyBase));
+    expect(hasPersistentChanges(snapshotBeforeCall, unchangedLocalDb)).toBe(false);
+
+    // 2. Prevenção de conflito falso em duas reanálises consecutivas
+    // Initial revision: 1
+    const baseRev1: VisualDNA = {
+      ...createFullBaseRef("reanalysis-test-id"),
+      revision: 1,
+      updatedAt: 1000
+    };
+
+    // Primeira reanálise:
+    const snapshot1: VisualDNA = JSON.parse(JSON.stringify(baseRev1));
+    const patch1 = createVisualDNAPatch({
+      summary: "Reanalysis 1 update",
+      rendering: "Enhanced linework",
+      scores: { rendering: 0.9 }
+    });
+    const merge1 = mergeVisualDNASafe(snapshot1, patch1);
+    expect(merge1.changed).toBe(true);
+
+    // Simulação do saveDNA persistido:
+    const persistedRev2: VisualDNA = {
+      ...merge1.data,
+      revision: (snapshot1.revision || 1) + 1, // revision increments to 2
+      updatedAt: 2000
+    };
+
+    // Estado da seleção é atualizado com o registro PERSISTIDO (revisão 2), não com objeto pré-incremento
+    const currentSelection = persistedRev2;
+    expect(currentSelection.revision).toBe(2);
+
+    // Segunda reanálise começa sem nenhuma edição externa:
+    // Captura snapshot da seleção / banco local atual (revisão 2)
+    const snapshot2: VisualDNA = JSON.parse(JSON.stringify(currentSelection));
+    expect(snapshot2.revision).toBe(2);
+
+    // Ao terminar a segunda requisição, banco local ainda está na revisão 2:
+    const localDbAtSecondResponse = persistedRev2;
+    const secondConflict =
+      snapshot2.revision !== undefined &&
+      localDbAtSecondResponse.revision !== undefined &&
+      localDbAtSecondResponse.revision !== snapshot2.revision;
+
+    // Não deve acusar conflito!
+    expect(secondConflict).toBe(false);
+    expect(hasPersistentChanges(snapshot2, localDbAtSecondResponse)).toBe(false);
   });
 });

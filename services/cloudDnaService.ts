@@ -37,7 +37,7 @@ export const setCloudSyncEnabled = (enabled: boolean): void => {
   localStorage.setItem("grimoire_cloud_sync_enabled", String(enabled));
 };
 
-export const saveDNA = async (dna: VisualDNA): Promise<void> => {
+export const saveDNA = async (dna: VisualDNA): Promise<VisualDNA> => {
   const existing = await getLocalDNA().then(list => list.find(d => d.id === dna.id));
   
   const toSave = { ...dna };
@@ -91,6 +91,8 @@ export const saveDNA = async (dna: VisualDNA): Promise<void> => {
       }
     });
   }
+
+  return toSave;
 };
 
 export const deleteDNA = async (id: string): Promise<void> => {
