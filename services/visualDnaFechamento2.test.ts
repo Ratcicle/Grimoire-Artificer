@@ -404,7 +404,7 @@ describe("GRIMOIRE ARTIFICER — FECHAMENTO DA RODADA 2", () => {
       const res = synthesizeVisualDNA({
         references: [ref],
         intensity: "medium",
-        subject: "A noble priest",
+        subject: "A noble priest with sacred light and crimson embers",
         cardType: CardType.Monster,
         archetype: Archetype.RoyalCarmine
       });

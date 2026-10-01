@@ -1,10 +1,11 @@
 import { VisualDNA, SynthesisDebug, MatchDetail, DNAMatchingResult, MatchingScoreLog, CardType, Context, Complexity, Archetype } from "../types";
 import { VISUAL_TAG_KEYWORDS, isCalibratedRecord } from "./visualTags";
-import { parsePromptIntent } from "./promptParser";
+import { parsePromptIntent, matchesPromptExclusion } from "./promptParser";
 import { ARCHETYPE_DEFINITIONS } from "../constants";
 import {
   SynthesisContext,
-  evaluateCandidateFragment,
+  evaluateCandidateFragment as evaluatePolicyFragment,
+  filterFragmentForIdentity,
   ARCHETYPE_POLICY_RULES
 } from "./visualDnaPolicy";
 
@@ -35,7 +36,8 @@ export const scoreVisualDNAReferenceBase = (
   dna: VisualDNA,
   queryWordsNormalized: string,
   cardType: string,
-  excludedWords?: Set<string>
+  excludedWords?: Set<string>,
+  context?: Context | string
 ) => {
   let baseScore = 0;
   const matches: MatchDetail[] = [];
@@ -203,6 +205,21 @@ export const scoreVisualDNAReferenceBase = (
   checkField("positivePrompt", dna.positivePrompt, 0.5);
   checkField("styleAnchors", dna.styleAnchors, 0.75);
   checkField("visualMotifs", dna.visualMotifs, 0.75);
+  checkField("contentMotifs", dna.contentMotifs, 0.75);
+  checkField("primarySubject", dna.subjectProfile?.primarySubject, 1);
+  checkField("subjectDescriptions", dna.subjects?.map(subject => subject.description), 1);
+
+  // Focus complements thematic relevance; it never selects a record by utility
+  // or invents relevance for a reference with no query match.
+  if (baseScore > 0 && context) {
+    const categories = [dna.subjectProfile?.subjectCategory, ...(dna.subjects || []).filter(s => s.visualRole === 'primary').map(s => s.category)].filter(Boolean).map(normalizeText);
+    const focusCategories: Record<string, string[]> = {
+      [Context.Character]: ['humanoid', 'human', 'character', 'creature', 'beast', 'dragon', 'monster'],
+      [Context.Object]: ['object', 'artifact', 'weapon', 'equipment', 'item'],
+      [Context.Scenario]: ['environment', 'scenario', 'landscape', 'architecture', 'location', 'setting']
+    };
+    if (categories.some(category => focusCategories[context]?.includes(category))) addMatch('ContextFocus', context, 2);
+  }
 
   return {
     baseScore,
@@ -295,14 +312,15 @@ export const getAutomaticReferences = (
   cardType: string,
   archetype: string,
   database: VisualDNA[],
-  maxReferences: number = 3
+  maxReferences: number = 3,
+  context?: Context | string
 ): VisualDNA[] => {
   const { affirmativeText, excludedWords } = parsePromptIntent(subject);
   const queryWords = [affirmativeText, cardType, archetype].filter(Boolean).join(" ");
   const normalizedQuery = normalizeText(queryWords);
 
   const scored = database.map(dna => {
-    return { dna, result: scoreVisualDNAReferenceBase(dna, normalizedQuery, cardType, excludedWords) };
+    return { dna, result: scoreVisualDNAReferenceBase(dna, normalizedQuery, cardType, excludedWords, context) };
   }).filter(item => item.result.baseScore > 0);
 
   const finalSelection = calculateComplementaryScores(scored, maxReferences);
@@ -315,14 +333,15 @@ export const getMatchingLogs = (
   archetype: string,
   database: VisualDNA[],
   selectedIds: string[],
-  maxReferences: number = 3
+  maxReferences: number = 3,
+  context?: Context | string
 ): MatchingScoreLog[] => {
   const { affirmativeText, excludedWords } = parsePromptIntent(subject);
   const queryWords = [affirmativeText, cardType, archetype].filter(Boolean).join(" ");
   const normalizedQuery = normalizeText(queryWords);
   
   const scored = database.map(dna => {
-    return { dna, result: scoreVisualDNAReferenceBase(dna, normalizedQuery, cardType, excludedWords) };
+    return { dna, result: scoreVisualDNAReferenceBase(dna, normalizedQuery, cardType, excludedWords, context) };
   });
   
   // Use the exact maxReferences as generation
@@ -392,13 +411,14 @@ export const synthesizeVisualDNA = (
     return { promptBlock: "", usedReferences: [], selectedReferences: [], debugInfo: null };
   }
 
-  const { affirmativeText, excludedWords } = parsePromptIntent(userPrompt || subject);
+  const { affirmativeText, excludedWords, excludedPhrases } = parsePromptIntent(userPrompt || subject);
   const resolvedPreset = params.archetypePreset || ARCHETYPE_DEFINITIONS[archetype as Archetype] || ARCHETYPE_DEFINITIONS[Archetype.Generic];
 
   const synthesisContext: SynthesisContext = {
     subject,
     affirmativeText,
     excludedWords,
+    excludedPhrases,
     cardType,
     context: params.context || Context.Character,
     complexity: params.complexity || Complexity.Medium,
@@ -418,10 +438,20 @@ export const synthesizeVisualDNA = (
 
   const contributingRefIds = new Set<string>();
 
+  const evaluateCandidateFragment = (...args: Parameters<typeof evaluatePolicyFragment>) => {
+    const result = evaluatePolicyFragment(...args);
+    const [, field, ref] = args;
+    for (const rejected of result.rejectedClauses || []) {
+      debugInfo.evaluations!.push({ referenceId: ref.id, referenceName: ref.name || 'Unnamed', field: `${field}.clause`, text: rejected.text, decision: 'discarded', reason: rejected.reason });
+    }
+    return result;
+  };
+
   const evaluateAndRecord = (
     rawFragment: string,
     field: string,
-    ref: VisualDNA
+    ref: VisualDNA,
+    unusedReason?: string
   ): { included: boolean; text: string } => {
     if (!rawFragment || typeof rawFragment !== "string" || !rawFragment.trim()) {
       return { included: false, text: "" };
@@ -436,7 +466,7 @@ export const synthesizeVisualDNA = (
       }
     }
 
-    if (evalRes.decision === "included" && evalRes.text) {
+    if (evalRes.decision === "included" && evalRes.text && !unusedReason) {
       contributingRefIds.add(ref.id);
       debugInfo.evaluations!.push({
         referenceId: ref.id,
@@ -456,7 +486,7 @@ export const synthesizeVisualDNA = (
       field,
       text: evalRes.originalText || rawFragment.trim(),
       decision: "discarded",
-      reason: evalRes.reason
+      reason: evalRes.decision === 'discarded' ? evalRes.reason : unusedReason || evalRes.reason
     });
     return { included: false, text: "" };
   };
@@ -475,15 +505,16 @@ export const synthesizeVisualDNA = (
       return references.indexOf(a) - references.indexOf(b);
     });
 
+    let selected = '';
     for (const ref of sorted) {
       // 1. Check primary field
       const val = ref[primaryField];
       if (val) {
         const items = Array.isArray(val) ? val : [String(val)];
         for (const item of items) {
-          const res = evaluateAndRecord(item, String(primaryField), ref);
+          const res = evaluateAndRecord(item, String(primaryField), ref, selected ? 'Not used: a higher-priority compatible contribution already fills this slot.' : undefined);
           if (res.included && res.text) {
-            return res.text;
+            selected = res.text;
           }
         }
       }
@@ -494,16 +525,16 @@ export const synthesizeVisualDNA = (
         if (fbVal) {
           const items = Array.isArray(fbVal) ? fbVal : [String(fbVal)];
           for (const item of items) {
-            const res = evaluateAndRecord(item, String(fbField), ref);
+            const res = evaluateAndRecord(item, String(fbField), ref, selected ? 'Not used: the selected contribution already fills this slot.' : undefined);
             if (res.included && res.text) {
-              return res.text;
+              selected = res.text;
             }
           }
         }
       }
     }
 
-    return "";
+    return selected;
   };
 
   const userPromptNorm = normalizeText(affirmativeText || userPrompt || subject);
@@ -523,7 +554,7 @@ export const synthesizeVisualDNA = (
 
         // Check if archetype preset specifically requires this signature trait
         const archRules = ARCHETYPE_POLICY_RULES[archetype as string];
-        if (archRules && archRules.signatureTerms.some(st => normalizeText(st).includes(w))) {
+        if (archRules && archRules.signatureTerms.some(st => checkExactMatch(w, normalizeText(st)))) {
           return true;
         }
       }
@@ -627,7 +658,7 @@ export const synthesizeVisualDNA = (
 
       // Check if motif contains excluded words
       const words = normMotif.split(/\s+/).filter(w => w.length > 2);
-      const isExcluded = words.some(w => excludedWords.has(w));
+      const isExcluded = matchesPromptExclusion(motif, excludedPhrases);
       if (isExcluded) {
         debugInfo.motifs.push({ motif, used: false, reason: "Contains user-excluded word." });
         debugInfo.evaluations!.push({
@@ -726,6 +757,7 @@ export const synthesizeVisualDNA = (
 
   // Semantic slot resolutions based on intensity
   const rendering = getBestSlot("rendering", ["linework"], "rendering");
+  const lighting = getBestSlot("lighting", [], "lighting");
   const composition = getBestSlot("compositionRecipe", ["composition", "framing"], "composition");
 
   const shapeLanguage = intensity !== "low" ? getBestSlot("shapeLanguage", ["silhouette"], "silhouette") : "";
@@ -761,56 +793,23 @@ export const synthesizeVisualDNA = (
       const validCues: string[] = [];
       const seenCleanCues = new Set<string>();
 
-      for (const f of (sp.scaleForms || [])) {
-        if (!f || typeof f !== "string" || !f.trim()) continue;
-        const evalRes = evaluateCandidateFragment(f, "scaleForms", primaryRef, synthesisContext);
-        const blockedList = evalRes.blockedIdentities || (evalRes.blockedIdentity ? [evalRes.blockedIdentity] : []);
-        for (const b of blockedList) {
-          if (!debugInfo.identityBlocked.includes(b)) debugInfo.identityBlocked.push(b);
-        }
-        if (evalRes.decision === "included" && evalRes.text) {
-          const normClean = normalizeText(evalRes.text);
-          if (!seenCleanForms.has(normClean) && validForms.length < 2) {
-            seenCleanForms.add(normClean);
-            validForms.push(evalRes.text);
-            contributingRefIds.add(primaryRef.id);
-            debugInfo.evaluations!.push({
-              referenceId: primaryRef.id,
-              referenceName: primaryRef.name || "Unnamed",
-              field: "scaleForms",
-              text: evalRes.originalText || f.trim(),
-              cleanedText: evalRes.text !== f.trim() ? evalRes.text : undefined,
-              decision: "included",
-              reason: evalRes.reason
-            });
+      const collectScale = (items: string[], field: string, accepted: string[], seen: Set<string>) => {
+        for (const item of items) {
+          if (typeof item !== 'string' || !item.trim()) continue;
+          const evaluation = evaluatePolicyFragment(item, field, primaryRef, synthesisContext);
+          const normalized = normalizeText(evaluation.text);
+          const unusedReason = evaluation.decision !== 'included' ? undefined
+            : seen.has(normalized) ? 'Duplicate scale contribution after cleaning.'
+            : accepted.length >= 2 ? 'Exceeds intensity limit for scale contributions.' : undefined;
+          const result = evaluateAndRecord(item, field, primaryRef, unusedReason);
+          if (result.included) {
+            accepted.push(result.text);
+            seen.add(normalized);
           }
         }
-      }
-      for (const c of (sp.scaleCues || [])) {
-        if (!c || typeof c !== "string" || !c.trim()) continue;
-        const evalRes = evaluateCandidateFragment(c, "scaleCues", primaryRef, synthesisContext);
-        const blockedList = evalRes.blockedIdentities || (evalRes.blockedIdentity ? [evalRes.blockedIdentity] : []);
-        for (const b of blockedList) {
-          if (!debugInfo.identityBlocked.includes(b)) debugInfo.identityBlocked.push(b);
-        }
-        if (evalRes.decision === "included" && evalRes.text) {
-          const normClean = normalizeText(evalRes.text);
-          if (!seenCleanCues.has(normClean) && validCues.length < 2) {
-            seenCleanCues.add(normClean);
-            validCues.push(evalRes.text);
-            contributingRefIds.add(primaryRef.id);
-            debugInfo.evaluations!.push({
-              referenceId: primaryRef.id,
-              referenceName: primaryRef.name || "Unnamed",
-              field: "scaleCues",
-              text: evalRes.originalText || c.trim(),
-              cleanedText: evalRes.text !== c.trim() ? evalRes.text : undefined,
-              decision: "included",
-              reason: evalRes.reason
-            });
-          }
-        }
-      }
+      };
+      collectScale(sp.scaleForms || [], 'scaleForms', validForms, seenCleanForms);
+      collectScale(sp.scaleCues || [], 'scaleCues', validCues, seenCleanCues);
 
       const forms = validForms.join(", ");
       const cues = validCues.join(", ");
@@ -977,7 +976,16 @@ export const synthesizeVisualDNA = (
 
   const processAvoidRule = (rule: string, source: string, ref: VisualDNA) => {
     if (!rule || typeof rule !== "string") return;
-    const trimmedRule = rule.trim();
+    const identity = filterFragmentForIdentity(rule, ref.identitySpecificDetails || []);
+    for (const blocked of identity.blockedDetails) {
+      if (!debugInfo.identityBlocked.includes(blocked)) debugInfo.identityBlocked.push(blocked);
+    }
+    if (!identity.safeToKeep) {
+      debugInfo.avoidRules.push({ rule: rule.trim(), source, applied: false, reason: 'Contains blocked identity detail.' });
+      debugInfo.evaluations!.push({ referenceId: ref.id, referenceName: ref.name || 'Unnamed', field: 'avoidRules', text: rule.trim(), decision: 'discarded', reason: 'Contains blocked identity detail.' });
+      return;
+    }
+    const trimmedRule = identity.cleanedText;
     if (!trimmedRule) return;
 
     const norm = normalizeText(trimmedRule);
@@ -1076,6 +1084,30 @@ export const synthesizeVisualDNA = (
     }
   });
 
+  // Explain available fields that are intentionally not emitted (search metadata,
+  // intensity, confidence, secondary scale profiles). These are not incompatibilities.
+  const textFields = ['summary', 'positivePrompt', 'linework', 'rendering', 'palette', 'silhouette', 'pose', 'framing', 'composition', 'lighting', 'effects', 'materials', 'details', 'background', 'hierarchy', 'shapeLanguage', 'focalAnchors', 'detailPlacement', 'compositionRecipe', 'paletteLogic', 'materialBehavior', 'energyDesign'] as const;
+  for (const ref of references) {
+    for (const field of textFields) {
+      const value = ref[field];
+      if (typeof value !== 'string' || !value.trim()) continue;
+      if (debugInfo.evaluations!.some(e => e.referenceId === ref.id && e.field === field)) continue;
+      debugInfo.evaluations!.push({ referenceId: ref.id, referenceName: ref.name || 'Unnamed', field, text: value, decision: 'discarded', reason: field === 'summary' || field === 'positivePrompt' ? 'Not used in synthesis: search metadata only.' : 'Not consumed at the selected intensity.' });
+    }
+    for (const [profileField, profile] of [['scaleProfile', ref.scaleProfile], ['substanceProfile', ref.substanceProfile]] as const) {
+      if (!profile) continue;
+      for (const [field, value] of Object.entries(profile)) {
+        if (field === 'confidence') continue;
+        const consumedField = field === 'materials' ? 'substanceMaterials' : field === 'elements' ? 'substanceElements' : field;
+        if (debugInfo.evaluations!.some(e => e.referenceId === ref.id && e.field === consumedField)) continue;
+        for (const item of Array.isArray(value) ? value : [value]) {
+          if (typeof item !== 'string' || !item.trim()) continue;
+          debugInfo.evaluations!.push({ referenceId: ref.id, referenceName: ref.name || 'Unnamed', field: `${profileField}.${field}`, text: item, decision: 'discarded', reason: profile.confidence < .5 ? 'Not consumed: profile confidence is below the threshold.' : 'Not consumed: profile metadata, secondary reference, or intensity limit.' });
+        }
+      }
+    }
+  }
+
   const allNegative = usedAvoids.join(", ");
 
   // Build the final prompt block cleanly
@@ -1083,7 +1115,7 @@ export const synthesizeVisualDNA = (
 
   if (contributingRefIds.size === 0) {
     debugInfo.allContributionsDiscarded = true;
-    promptBlock = "VISUAL DNA DIRECTION (SUBORDINATE GUIDANCE):\n[All evaluated database fragments were safely discarded as incompatible with the prompt or archetype. Strictly follow the user description and archetype preset.]";
+    promptBlock = "VISUAL DNA DIRECTION (SUBORDINATE GUIDANCE):\n[No database contribution was emitted after compatibility, field availability and intensity decisions. Strictly follow the user description and archetype preset.]";
   } else {
     debugInfo.allContributionsDiscarded = false;
     const lines: string[] = [
@@ -1102,6 +1134,7 @@ export const synthesizeVisualDNA = (
     if (rendering) {
       lines.push(`- Rendering: ${rendering}`);
     }
+    if (lighting) lines.push(`- Lighting: ${lighting}`);
 
     if (intensity !== "low" && shapeLanguage) {
       lines.push(`- Silhouette & Shape: ${shapeLanguage}`);

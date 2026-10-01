@@ -1,271 +1,11 @@
 import { VisualDNA } from "../types";
 
-export const VISUAL_TAG_CATEGORIES: Record<string, string[]> = {
-  "Core": [
-    "boss monster", "spell artwork", "trap artwork", "field spell", "humanoid",
-    "creature", "dragon", "machine", "undead", "organic horror", "western",
-    "dark fantasy", "divine", "forest", "mechanical", "magical burst",
-    "dynamic pose", "high detail", "strong silhouette", "complex background",
-    "abstract background", "particles", "armor", "weapon focus"
-  ],
-  "Physical Scale": [
-    "tiny", "small creature", "human scale", "large creature", "giant",
-    "colossal", "titanic", "cosmic scale"
-  ],
-  "Scale Form": [
-    "towering", "massive wingspan", "serpentine length", "broad mass",
-    "vertical scale", "horizon-spanning", "environmental body"
-  ],
-  "Scale Cues": [
-    "low-angle scale", "tiny human comparison", "architecture comparison",
-    "landscape comparison", "atmospheric depth", "distant horizon",
-    "partially cropped body", "wide establishing shot", "ground impact",
-    "environmental destruction"
-  ],
-  "Perceived Presence": [
-    "intimate presence", "balanced presence", "dominant presence",
-    "monumental presence", "overwhelming presence"
-  ],
-  "Materials": [
-    "metal", "steel", "gold", "silver", "bronze", "stone", "marble",
-    "obsidian", "ceramic", "glass", "crystal", "gemstone", "flesh", "bone",
-    "chitin", "scales", "fur", "feathers", "leather", "wood", "bark",
-    "roots", "vines", "fungal growth", "smoke body", "mist body", "liquid body",
-    "slime body", "shadow body", "light body", "energy body", "plasma body",
-    "flame body", "ice body", "sand body", "cosmic matter",
-    "fabric", "silk", "satin", "velvet", "lace"
-  ],
-  "Surface / Finish": [
-    "polished", "glossy", "matte", "reflective", "translucent", "transparent",
-    "luminous", "iridescent", "pearlescent", "metallic", "weathered",
-    "corroded", "rusted", "cracked", "chipped", "eroded", "charred", "scarred",
-    "decayed", "dust-covered", "smooth", "rough", "jagged", "segmented",
-    "layered", "plated", "engraved", "ornamented", "veined", "scaled texture",
-    "faceted", "porous", "fibrous", "molten", "wet", "oozing", "smoking",
-    "frosted", "electrified", "glowing from within", "light-absorbing",
-    "energy-cracked", "embroidered"
-  ],
-
-  "Elements": [
-    "fire", "water", "ice", "wind", "earth", "lightning", "light", "darkness",
-    "shadow", "poison", "acid", "plant", "fungal", "sand", "magma", "plasma",
-    "cosmic", "void", "arcane", "holy", "necrotic"
-  ],
-  "Element Application": [
-    "aura", "body composition", "armor infusion", "weapon infusion",
-    "energy core", "elemental veins", "halo", "elemental wings", "projectile",
-    "explosion", "environmental effect", "background phenomenon"
-  ]
-};
-
-export const ALLOWED_VISUAL_TAGS: string[] = Object.values(VISUAL_TAG_CATEGORIES).flat();
-
-export const getTagCategory = (tag: string): string => {
-  const generic = ['high detail', 'particles', 'strong silhouette', 'dynamic pose'];
-  if (generic.includes(tag)) return "Generic";
-  
-  const coreSubjects = ['humanoid', 'creature', 'dragon', 'machine', 'undead', 'organic horror'];
-  if (coreSubjects.includes(tag)) return "Core Subject";
-
-  for (const [cat, tags] of Object.entries(VISUAL_TAG_CATEGORIES)) {
-    if (tags.includes(tag)) {
-       return cat === "Core" ? "Core" : cat;
-    }
-  }
-  return "Core";
-};
-
-
-export const DEFAULT_VISUAL_DNA_SCORES = {
-  style: 0.5, palette: 0.5, pose: 0.5, composition: 0.5, lighting: 0.5, effects: 0.5, materials: 0.5, background: 0.5, details: 0.5, silhouette: 0.5, rendering: 0.5
-};
-
-export const SUPPORTED_CALIBRATION_VERSIONS = [3] as const;
-
-export const UTILITY_DIMENSIONS = [
-  'rendering', 'composition', 'palette', 'lighting', 'materials',
-  'background', 'details', 'effects', 'pose', 'silhouette', 'style'
-] as const;
-
-export const DESCRIPTOR_DIMENSIONS = ['detailDensity'] as const;
-
-export const ALL_CANONICAL_DIMENSIONS = [
-  'rendering', 'composition', 'palette', 'lighting', 'materials',
-  'background', 'details', 'effects', 'pose', 'silhouette', 'style',
-  'detailDensity'
-] as const;
-
-export const VALID_UTILITY_DIMENSIONS = ALL_CANONICAL_DIMENSIONS;
-
-export const TECHNICAL_ANALYSIS_FIELDS = [
-  'linework', 'rendering', 'palette', 'silhouette', 'pose', 'framing',
-  'composition', 'lighting', 'effects', 'materials', 'details', 'background',
-  'hierarchy', 'visualMotifs', 'shapeLanguage', 'focalAnchors', 'detailPlacement',
-  'compositionRecipe', 'paletteLogic', 'materialBehavior', 'energyDesign',
-  'styleAnchors', 'avoidRules'
-] as const;
-
-export interface AnalysisCompletenessResult {
-  isUsable: boolean;
-  errors: string[];
-}
-
-export const validateAnalysisCompleteness = (
-  rawJson: any
-): AnalysisCompletenessResult => {
-  const errors: string[] = [];
-
-  if (!rawJson || typeof rawJson !== 'object' || Array.isArray(rawJson)) {
-    return { isUsable: false, errors: ["Analysis response must be a valid JSON object."] };
-  }
-
-  // 1. summary non-empty string after trim
-  if (typeof rawJson.summary !== 'string' || rawJson.summary.trim().length === 0) {
-    errors.push("Analysis must include a non-empty summary after trimming.");
-  }
-
-  // 2. At least one technical field or at least one stylePromptFragments item
-  const hasTechnicalField = TECHNICAL_ANALYSIS_FIELDS.some(field => {
-    const val = rawJson[field];
-    return typeof val === 'string' && val.trim().length > 0;
-  });
-
-  const hasStyleFragment = Array.isArray(rawJson.stylePromptFragments) &&
-    rawJson.stylePromptFragments.some((frag: any) => typeof frag === 'string' && frag.trim().length > 0);
-
-  if (!hasTechnicalField && !hasStyleFragment) {
-    errors.push("Analysis must include at least one non-empty technical description field or style prompt fragment.");
-  }
-
-  // 3. At least one utility dimension evaluated with a valid number in [0, 1]
-  const scoresObj = rawJson.scores;
-  if (!scoresObj || typeof scoresObj !== 'object' || Array.isArray(scoresObj)) {
-    errors.push("Analysis must include a scores object with at least one evaluated utility dimension.");
-  } else {
-    for (const [key, val] of Object.entries(scoresObj)) {
-      if (val === null) {
-        errors.push(`Score for "${key}" cannot be null; omit the field if not evaluated.`);
-      }
-    }
-
-    const hasUtilityScore = UTILITY_DIMENSIONS.some(dim => {
-      const val = scoresObj[dim];
-      return typeof val === 'number' && Number.isFinite(val) && val >= 0.0 && val <= 1.0;
-    });
-
-    if (!hasUtilityScore) {
-      errors.push("Analysis must evaluate at least one utility dimension (detailDensity alone does not count).");
-    }
-  }
-
-  return {
-    isUsable: errors.length === 0,
-    errors
-  };
-};
-
-export interface ScoreValidationResult {
-  isValid: boolean;
-  errors: string[];
-  validatedScores: Record<string, number | undefined>;
-  justifications: Record<string, string>;
-  isCalibrated: boolean;
-}
-
-export const validateVisualDNAScores = (
-  rawScores: any,
-  rawJustifications?: any
-): ScoreValidationResult => {
-  const errors: string[] = [];
-  const validatedScores: Record<string, number | undefined> = {};
-  const justifications: Record<string, string> = {};
-
-  if (!rawScores || typeof rawScores !== 'object' || Array.isArray(rawScores)) {
-    return {
-      isValid: false,
-      errors: ["Scores must be an object with numeric utility ratings between 0.0 and 1.0."],
-      validatedScores: {},
-      justifications: {},
-      isCalibrated: false
-    };
-  }
-
-  for (const dim of VALID_UTILITY_DIMENSIONS) {
-    if (!(dim in rawScores)) {
-      continue;
-    }
-
-    const val = rawScores[dim];
-
-    if (val === null) {
-      errors.push(`Score for "${dim}" cannot be null; omit the field if not evaluated.`);
-      continue;
-    }
-
-    if (val === undefined) {
-      continue;
-    }
-
-    if (typeof val === 'boolean' || typeof val === 'string' || typeof val !== 'number') {
-      errors.push(`Score for "${dim}" must be a number, received ${typeof val} (${JSON.stringify(val)}).`);
-      continue;
-    }
-
-    if (isNaN(val) || !Number.isFinite(val)) {
-      errors.push(`Score for "${dim}" must be a finite number, received ${val}.`);
-      continue;
-    }
-
-    if (val < 0.0 || val > 1.0) {
-      errors.push(`Score for "${dim}" must be between 0.0 and 1.0, received ${val}. Values outside contract must not be clamped or guessed.`);
-      continue;
-    }
-
-    // Only assign valid finite numbers (never assign undefined properties)
-    validatedScores[dim] = val;
-  }
-
-  if (rawJustifications && typeof rawJustifications === 'object' && !Array.isArray(rawJustifications)) {
-    for (const [k, v] of Object.entries(rawJustifications)) {
-      if (typeof v === 'string' && v.trim()) {
-        justifications[k] = v.trim().replace(/\s+/g, ' ');
-      }
-    }
-  }
-
-  return {
-    isValid: errors.length === 0,
-    errors,
-    validatedScores,
-    justifications,
-    isCalibrated: errors.length === 0
-  };
-};
-
-export const isCalibratedRecord = (
-  ref: Partial<VisualDNA> | null | undefined
-): boolean => {
-  if (!ref || typeof ref !== 'object' || Array.isArray(ref)) return false;
-  if (ref.isCalibrated !== true) return false;
-  if (typeof ref.calibrationVersion !== 'number' || !SUPPORTED_CALIBRATION_VERSIONS.includes(ref.calibrationVersion as any)) {
-    return false;
-  }
-  if (!ref.scores || typeof ref.scores !== 'object' || Array.isArray(ref.scores)) {
-    return false;
-  }
-
-  // Validação numérica existente: nenhum score canônico fornecido pode ser inválido
-  const scoreVal = validateVisualDNAScores(ref.scores);
-  if (!scoreVal.isValid) {
-    return false;
-  }
-
-  // Ao menos uma dimensão de utilidade validamente avaliada (detailDensity sozinho não conta)
-  return UTILITY_DIMENSIONS.some(dim => {
-    const val = (ref.scores as any)[dim];
-    return typeof val === 'number' && Number.isFinite(val) && val >= 0.0 && val <= 1.0;
-  });
-};
+import {
+  ALLOWED_VISUAL_TAGS, ALL_CANONICAL_DIMENSIONS, getTagCategory, isCalibratedRecord,
+  validateVisualDNAScores, VISUAL_TAG_PRIORITY,
+  normalizeProfileBlocks, normalizeSubjects, normalizeScaleRelationships
+} from './visualDnaContracts';
+export * from './visualDnaContracts';
 
 export const CANONICAL_DIMENSION_LABELS: Record<typeof ALL_CANONICAL_DIMENSIONS[number], string> = {
   rendering: 'renderização',
@@ -478,74 +218,46 @@ export const normalizeVisualDNAAnalysis = (parsed: any, originalWarnings: string
     .map((t: string) => t.toLowerCase().replace(/\s+/g, ' ').trim())
     .filter((t: string) => ALLOWED_VISUAL_TAGS.includes(t));
 
-  const derivedTags: string[] = [];
-
-  if (normalized.subjectProfile?.subjectCategory) {
-     derivedTags.push(normalized.subjectProfile.subjectCategory.toLowerCase());
+  const profiles = normalizeProfileBlocks(parsed, warnings);
+  for (const key of ['subjectProfile', 'scaleProfile', 'substanceProfile']) {
+    if (profiles[key]) normalized[key] = profiles[key];
+    else delete normalized[key];
   }
-  
+  // Keep the display representation compatible. Sparse merge decisions use raw presence,
+  // and normalizeProfileBlocks itself never fills these absent members.
   if (normalized.scaleProfile) {
-    normalized.scaleProfile.confidence = Math.max(0, Math.min(1, Number(normalized.scaleProfile.confidence) || 0));
-    normalized.scaleProfile.scaleForms = Array.isArray(normalized.scaleProfile.scaleForms) ? normalized.scaleProfile.scaleForms : [];
-    normalized.scaleProfile.scaleCues = Array.isArray(normalized.scaleProfile.scaleCues) ? normalized.scaleProfile.scaleCues : [];
-
+    normalized.scaleProfile.scaleForms ??= [];
+    normalized.scaleProfile.scaleCues ??= [];
+    normalized.scaleProfile.confidence ??= 0;
+  }
+  if (normalized.substanceProfile) {
+    for (const field of ['materials', 'surfaces', 'elements', 'elementApplications']) normalized.substanceProfile[field] ??= [];
+    normalized.substanceProfile.confidence ??= 0;
+  }
+  const derivedTags: string[] = [];
+  if (normalized.subjectProfile?.subjectCategory) derivedTags.push(normalized.subjectProfile.subjectCategory);
+  if (normalized.scaleProfile) {
     if (normalized.scaleProfile.confidence >= 0.5) {
-      if (normalized.scaleProfile.physicalScale) derivedTags.push(normalized.scaleProfile.physicalScale.toLowerCase());
-      if (normalized.scaleProfile.perceivedPresence) derivedTags.push(normalized.scaleProfile.perceivedPresence.toLowerCase());
-      if (normalized.scaleProfile.scaleForms.length > 0) derivedTags.push(...normalized.scaleProfile.scaleForms.map((t: string) => t.toLowerCase()));
-      if (normalized.scaleProfile.scaleCues.length > 0) derivedTags.push(...normalized.scaleProfile.scaleCues.map((t: string) => t.toLowerCase()));
+      const profile = normalized.scaleProfile;
+      derivedTags.push(...[profile.physicalScale, profile.perceivedPresence].filter(Boolean),
+        ...(profile.scaleForms || []), ...(profile.scaleCues || []));
     } else {
       warnings.push("Scale profile ignored for tags due to low confidence.");
     }
   }
-
   if (normalized.substanceProfile) {
-    normalized.substanceProfile.confidence = Math.max(0, Math.min(1, Number(normalized.substanceProfile.confidence) || 0));
-    normalized.substanceProfile.materials = Array.isArray(normalized.substanceProfile.materials) ? normalized.substanceProfile.materials.slice(0, 4) : [];
-    normalized.substanceProfile.surfaces = Array.isArray(normalized.substanceProfile.surfaces) ? normalized.substanceProfile.surfaces.slice(0, 4) : [];
-    normalized.substanceProfile.elements = Array.isArray(normalized.substanceProfile.elements) ? normalized.substanceProfile.elements.slice(0, 2) : [];
-    normalized.substanceProfile.elementApplications = Array.isArray(normalized.substanceProfile.elementApplications) ? normalized.substanceProfile.elementApplications.slice(0, 3) : [];
-
-    // Element Applications Validation
-    const elements = normalized.substanceProfile.elements;
-    let apps = normalized.substanceProfile.elementApplications;
-    
-    if (apps.includes("weapon infusion") && elements.length === 0) {
-      apps = apps.filter((a: string) => a !== "weapon infusion");
-      warnings.push("Removed weapon infusion application due to missing elements.");
-    }
-    if (apps.includes("armor infusion") && elements.length === 0) {
-      apps = apps.filter((a: string) => a !== "armor infusion");
-      warnings.push("Removed armor infusion application due to missing elements.");
-    }
-    if (apps.includes("elemental veins") && elements.length === 0) {
-      apps = apps.filter((a: string) => a !== "elemental veins");
-      warnings.push("Removed elemental veins application due to missing elements.");
-    }
-    normalized.substanceProfile.elementApplications = apps;
-
     if (normalized.substanceProfile.confidence >= 0.5) {
-      derivedTags.push(...normalized.substanceProfile.materials.map((t: string) => t.toLowerCase()));
-      derivedTags.push(...normalized.substanceProfile.surfaces.map((t: string) => t.toLowerCase()));
-      derivedTags.push(...normalized.substanceProfile.elements.map((t: string) => t.toLowerCase()));
-      derivedTags.push(...normalized.substanceProfile.elementApplications.map((t: string) => t.toLowerCase()));
+      for (const field of ['materials', 'surfaces', 'elements', 'elementApplications']) {
+        derivedTags.push(...(normalized.substanceProfile[field] || []));
+      }
     } else {
       warnings.push("Substance profile ignored for tags due to low confidence.");
     }
   }
-
-  if (Array.isArray(normalized.subjects)) {
-    normalized.subjects = normalized.subjects.slice(0, 4).map((sub: any) => ({
-      ...sub,
-      materials: Array.isArray(sub.materials) ? sub.materials : [],
-      surfaces: Array.isArray(sub.surfaces) ? sub.surfaces : [],
-      elements: Array.isArray(sub.elements) ? sub.elements : [],
-    }));
-  }
-
-  if (Array.isArray(normalized.scaleRelationships)) {
-    normalized.scaleRelationships = normalized.scaleRelationships.filter((rel: any) => rel.subjectA && rel.subjectB).slice(0, 3);
-  }
+  if (Array.isArray(parsed.subjects)) normalized.subjects = normalizeSubjects(parsed.subjects);
+  else delete normalized.subjects;
+  if (Array.isArray(parsed.scaleRelationships)) normalized.scaleRelationships = normalizeScaleRelationships(parsed.scaleRelationships);
+  else delete normalized.scaleRelationships;
 
   // Combine, deduplicate, filter allowed
   let combinedTags = [...new Set([...coreTags, ...derivedTags])]
@@ -585,15 +297,10 @@ export const normalizeVisualDNAAnalysis = (parsed: any, originalWarnings: string
     normalized.scaleProfile.perceivedPresence = presentPresenceTags[0];
   }
 
-  // Priorities for limiting (specificity)
-  const priorityOrder = [
-    "Core Subject", "Physical Scale", "Perceived Presence", "Materials", "Elements", "Element Application", "Surface / Finish", "Scale Form", "Scale Cues", "Core", "Generic"
-  ];
-
   combinedTags.sort((a, b) => {
     const catA = getTagCategory(a);
     const catB = getTagCategory(b);
-    return priorityOrder.indexOf(catA) - priorityOrder.indexOf(catB);
+    return VISUAL_TAG_PRIORITY.indexOf(catA as any) - VISUAL_TAG_PRIORITY.indexOf(catB as any);
   });
 
   normalized.tags = combinedTags.slice(0, 14);
@@ -630,14 +337,12 @@ export const normalizeVisualDNAAnalysis = (parsed: any, originalWarnings: string
   }
 
   normalized.analysisVersion = 3;
-  if (!normalized.analysisStatus || !['complete', 'partial', 'legacy'].includes(normalized.analysisStatus)) {
-    if (normalized.subjectProfile?.subjectCategory && normalized.scaleProfile?.physicalScale && normalized.substanceProfile?.materials) {
-       normalized.analysisStatus = 'complete';
-    } else if (normalized.subjectProfile || normalized.scaleProfile || normalized.substanceProfile) {
-       normalized.analysisStatus = 'partial';
-    } else {
-       normalized.analysisStatus = 'legacy';
-    }
+  if (normalized.subjectProfile?.subjectCategory && normalized.scaleProfile?.physicalScale && normalized.substanceProfile?.materials) {
+     normalized.analysisStatus = 'complete';
+  } else if (normalized.subjectProfile || normalized.scaleProfile || normalized.substanceProfile) {
+     normalized.analysisStatus = 'partial';
+  } else {
+     normalized.analysisStatus = 'legacy';
   }
 
   const cleanWarnings = warnings

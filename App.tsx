@@ -1,7 +1,8 @@
-import React, { useEffect, useState } from 'react';
-import { CardGenerationRequest, GeneratedCard, ImageModel } from './types';
-import { checkApiKey, promptApiKeySelection, disconnectApiKey, generateCardArt , extractUsageFromError, mapUsageMetadata } from './services/geminiService';
-import { saveTokenLog } from './services/localDbService';
+import React, { useEffect, useState, useRef } from 'react';
+import { CardGenerationRequest, GeneratedCard } from './types';
+import { checkApiKey, promptApiKeySelection, disconnectApiKey } from './services/geminiService';
+import { imageExtension } from './services/imagePreparation';
+import { runGeneration } from './services/aiOperations';
 import CardForm from './components/CardForm';
 import CardFrame from './components/CardFrame';
 const ArtstyleDatabase = React.lazy(() => import('./components/ArtstyleDatabase'));
@@ -42,80 +43,39 @@ const App: React.FC = () => {
       setError(null);
     } catch (e) {
       console.error(e);
-      setError("Failed to connect API key.");
+      setError(e instanceof Error ? e.message : "Failed to connect API key.");
     }
   };
 
+  const generationRef = useRef(false);
+  const [databaseVisited, setDatabaseVisited] = useState(false);
+  useEffect(() => { if (currentTab === 'database') setDatabaseVisited(true); }, [currentTab]);
+
   const handleGenerate = async (request: CardGenerationRequest) => {
+    if (generationRef.current) return;
+    generationRef.current = true;
     setIsLoading(true);
     setError(null);
-    const startTime = Date.now();
     try {
-      const hasKey = await checkApiKey();
-      
-      // Enforce key selection for Pro and Flash image models
-      if (!hasKey && (request.model === ImageModel.Pro || request.model === ImageModel.Flash)) {
-          throw new Error(`Para usar o modelo ${request.model === ImageModel.Pro ? 'Pro' : 'Flash'} para geração de imagens, você deve vincular sua chave de API.`);
-      }
-
-      const result = await generateCardArt(request);
-      
+      if (!await checkApiKey()) throw new Error('Configure uma chave no servidor local ou conecte a chave no AI Studio.');
+      const outcome = await runGeneration(request);
+      if (outcome.status === 'busy') return;
+      if (outcome.status === 'failed') throw new Error(outcome.error);
+      const result = outcome.result;
       const newCard: GeneratedCard = {
-        id: Date.now().toString(),
-        imageUrl: result.imageUrl,
-        request,
-        timestamp: Date.now(),
-        injectedPromptBlock: result.injectedPromptBlock,
-        usedReferences: result.usedReferences,
+        id: crypto.randomUUID(), imageUrl: result.imageUrl, request, timestamp: Date.now(), visualDbStatus: result.visualDbStatus,
+        injectedPromptBlock: result.injectedPromptBlock, usedReferences: result.usedReferences,
         selectedReferences: result.selectedReferences || result.usedReferences,
         contributingReferences: result.contributingReferences || [],
-        autoSelectScores: result.autoSelectScores,
-        synthDebug: result.synthDebug
+        autoSelectScores: result.autoSelectScores, synthDebug: result.synthDebug
       };
-
       setCurrentCard(newCard);
       setHistory(prev => [newCard, ...prev]);
-
-      // Smooth scroll to card on mobile
-      if (window.innerWidth < 1024) {
-        window.scrollTo({ top: 0, behavior: 'smooth' });
-      }
-
-      const durationMs = Date.now() - startTime;
-      await saveTokenLog({
-        id: crypto.randomUUID(),
-        timestamp: Date.now(),
-        operationType: "generate_image",
-        model: request.model,
-        ...mapUsageMetadata(result.usageMetadata),
-        success: true,
-        durationMs
-      });
-
-    } catch (err: unknown) {
-      const durationMs = Date.now() - startTime;
-      const usageMeta = extractUsageFromError(err);
-      const errorMessage = err instanceof Error ? err.message : "Unknown error";
-      await saveTokenLog({
-        id: crypto.randomUUID(),
-        timestamp: Date.now(),
-        operationType: "generate_image",
-        model: request.model,
-        ...mapUsageMetadata(usageMeta),
-        success: false,
-        errorMessage: errorMessage,
-        durationMs
-      });
-      
-      if (errorMessage.includes("Requested entity was not found") || errorMessage.includes("404")) {
-        setApiKeySet(false);
-        setError("API Key session expired or invalid. Please reconnect.");
-      } else if (errorMessage.includes("API key not found") || errorMessage.includes("403")) {
-         setError("Generation failed. Please connect an API Key to use this feature.");
-      } else {
-        setError("The Grimoire failed to manifest the image. Try again.");
-      }
+      if (window.innerWidth < 1024) window.scrollTo({ top: 0, behavior: 'smooth' });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Generation failed.');
     } finally {
+      generationRef.current = false;
       setIsLoading(false);
     }
   };
@@ -128,7 +88,7 @@ const App: React.FC = () => {
         .slice(0, 30)
         .replace(/[^a-z0-9]/gi, '-')
         .toLowerCase();
-    link.download = `shadow-duel-${safeSubject}-${Date.now()}.png`;
+    link.download = `shadow-duel-${safeSubject}-${Date.now()}.${imageExtension(currentCard.imageUrl)}`;
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -302,6 +262,13 @@ const App: React.FC = () => {
                               </button>
 
                               {/* DNA retrieved panel */}
+                              {currentCard.visualDbStatus && (
+                                <p className="text-xs text-stone-400" role="status">
+                                  {{disabled:'Artstyle Database desativada.',empty:'Biblioteca vazia; nenhuma referência usada.',
+                                    'no-selection':'Nenhuma referência selecionada.',filtered:'Referências selecionadas; contribuições filtradas por compatibilidade.',
+                                    contributing:'Artstyle Database aplicada à geração.'}[currentCard.visualDbStatus]}
+                                </p>
+                              )}
                               {((currentCard.usedReferences && currentCard.usedReferences.length > 0) || currentCard.synthDebug) && (
                                 <div className="mt-4 p-4 bg-stone-900/30 rounded-xl border border-stone-800 w-full max-w-sm text-left">
                                   <p className="text-[10px] font-bold text-amber-500 uppercase tracking-widest mb-2 flex items-center gap-1.5">
@@ -512,10 +479,12 @@ const App: React.FC = () => {
               </div>
             </div>
             
-            {currentTab === 'database' && (
+            {(databaseVisited || currentTab === 'database') && (
+              <div hidden={currentTab !== 'database'}>
               <React.Suspense fallback={<div className="p-8 text-stone-400">Loading database...</div>}>
                 <ArtstyleDatabase onBackToGrimoire={() => setCurrentTab('grimoire')} />
               </React.Suspense>
+              </div>
             )}
             
             {currentTab === 'tokenMonitor' && (

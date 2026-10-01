@@ -199,7 +199,7 @@ describe("GRIMOIRE ARTIFICER - COMPLEMENTO DA RODADA 2 TESTS", () => {
       const resGen = synthesizeVisualDNA({
         references: [genRef],
         intensity: "medium",
-        subject: "A warrior wearing black armor",
+        subject: "A warrior wearing black iron plate armor",
         cardType: CardType.Monster,
         archetype: Archetype.Generic
       });

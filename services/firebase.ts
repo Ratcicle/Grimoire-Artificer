@@ -13,6 +13,7 @@ import {
   where 
 } from "firebase/firestore";
 import { getAuth, signInWithPopup, GoogleAuthProvider, signOut, onAuthStateChanged, User } from "firebase/auth";
+import { notifyDnaChanges } from './dnaAccountContext';
 
 const firebaseConfig = {
   projectId: "gen-lang-client-0166321154",
@@ -25,6 +26,9 @@ const firebaseConfig = {
 
 const app = initializeApp(firebaseConfig);
 export const auth = getAuth(app);
+// CardForm can be mounted before the library tab. Account restoration must also
+// invalidate its local selector; this subscription performs no Firestore read.
+onAuthStateChanged(auth, () => notifyDnaChanges());
 
 // Use native persistent local cache to prevent exhausting daily quota upon refresh
 export const db = initializeFirestore(app, {

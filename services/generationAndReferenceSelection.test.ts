@@ -651,7 +651,7 @@ describe("Rodada 1: Generation Parameters and Reference Selection", () => {
         expect(synth.promptBlock).toContain("avoid dragon");
       });
 
-      it("blocks positive motif 'dragon scales' when prompt is 'a noble wearing a crown, no dragon'", () => {
+      it("blocks positive motif 'dragon scales' when prompt is 'a noble wearing a golden crown, no dragon'", () => {
         const refDna: VisualDNA = {
           ...makeDna("motifs-ref", "Motifs Ref", [], "Reference"),
           contentMotifs: ["dragon scales", "golden crown"]
@@ -660,10 +660,10 @@ describe("Rodada 1: Generation Parameters and Reference Selection", () => {
         const synth = synthesizeVisualDNA({
           references: [refDna],
           intensity: "high",
-          subject: "a noble wearing a crown, no dragon",
+          subject: "a noble wearing a golden crown, no dragon",
           cardType: "Monster",
           archetype: "Generic Fantasy",
-          userPrompt: "a noble wearing a crown, no dragon"
+          userPrompt: "a noble wearing a golden crown, no dragon"
         });
 
         const dragonMotif = synth.debugInfo?.motifs.find(m => m.motif === "dragon scales");

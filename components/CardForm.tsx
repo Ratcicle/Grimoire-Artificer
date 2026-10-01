@@ -1,6 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { Archetype, CardGenerationRequest, CardType, Complexity, Context, ImageModel, VisualDNA } from '../types';
 import { getLocalDNA } from '../services/localDbService';
+import { subscribeDnaChanges } from '../services/dnaAccountContext';
+import { validateImageFile } from '../services/imagePreparation';
 import { compressImage } from '../services/imageUtils';
 import { Wand2, Sparkles, Box, Ghost, Zap, Gauge, Crown, Upload, X, Database, Sliders, CheckSquare, Square } from 'lucide-react';
 
@@ -51,23 +53,32 @@ const CardForm: React.FC<CardFormProps> = ({ onSubmit, isLoading, hasApiKey, onR
   const [dnaList, setDnaList] = useState<VisualDNA[]>([]);
   const [dbExpanded, setDbExpanded] = useState(false);
 
+  const preparationVersion = React.useRef(0);
+  const preparingRef = React.useRef(false);
+  const [imageError, setImageError] = useState('');
   const fileInputRef = React.useRef<HTMLInputElement>(null);
 
   useEffect(() => {
+    let active = true;
+    let version = 0;
     const loadDna = async () => {
+      const requestVersion = ++version;
       try {
         const list = await getLocalDNA();
-        setDnaList(list);
-      } catch (err) {
-        console.error("Failed to load DNA list in CardForm", err);
-      }
+        if (active && version === requestVersion) {
+          setDnaList(list);
+          setDbManualReferenceIds(ids => ids.filter(id => list.some(d => d.id === id)));
+        }
+      } catch { if (active && version === requestVersion) setDnaList([]); }
     };
-    loadDna();
-  }, [isLoading, useVisualDB]);
+    void loadDna();
+    const unsubscribe = subscribeDnaChanges(loadDna);
+    return () => { active = false; unsubscribe(); };
+  }, [useVisualDB]);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (subject.trim()) {
+    if (subject.trim() && !isLoading && !preparingRef.current) {
       onSubmit({ 
         subject, 
         cardType, 
@@ -96,23 +107,29 @@ const CardForm: React.FC<CardFormProps> = ({ onSubmit, isLoading, hasApiKey, onR
     const file = e.target.files?.[0];
     if (!file) return;
 
+    const version = ++preparationVersion.current;
+    preparingRef.current = true;
+    setIsCompressing(true);
+    setReferenceImage(undefined);
+    setImageError('');
     try {
-      setIsCompressing(true);
+      validateImageFile(file);
       const compressedDataUrl = await compressImage(file, 1536, 1536, 0.85);
-      setReferenceImage(compressedDataUrl);
+      if (version === preparationVersion.current) setReferenceImage(compressedDataUrl);
     } catch (err) {
-      console.error("Failed to compress image:", err);
-      clearReferenceImage();
+      if (version === preparationVersion.current) setImageError(err instanceof Error ? err.message : 'Image preparation failed.');
     } finally {
-      setIsCompressing(false);
+      if (version === preparationVersion.current) {preparingRef.current = false;setIsCompressing(false);}
     }
   };
 
   const clearReferenceImage = () => {
+    preparationVersion.current++;
+    preparingRef.current = false;
+    setIsCompressing(false);
     setReferenceImage(undefined);
-    if (fileInputRef.current) {
-      fileInputRef.current.value = '';
-    }
+    setImageError('');
+    if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
   const toggleManualId = (id: string) => {
@@ -438,11 +455,12 @@ const CardForm: React.FC<CardFormProps> = ({ onSubmit, isLoading, hasApiKey, onR
         )}
       </div>
 
+      {imageError && <p role="alert" className="text-red-400 text-sm">{imageError}</p>}
       <button
         type="submit"
-        disabled={isLoading || !subject.trim()}
+        disabled={isLoading || isCompressing || !subject.trim()}
         className={`mt-4 w-full py-4 rounded-lg font-bold tracking-widest uppercase flex items-center justify-center gap-2 transition-all ${
-          isLoading || !subject.trim()
+          isLoading || isCompressing || !subject.trim()
             ? 'bg-stone-800 text-stone-600 cursor-not-allowed'
             : 'bg-amber-600 hover:bg-amber-500 text-white shadow-lg shadow-amber-900/50'
         }`}

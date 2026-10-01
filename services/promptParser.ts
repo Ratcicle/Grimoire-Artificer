@@ -89,7 +89,8 @@ export const isPortuguesePrepositionNo = (fullText: string, matchIndex: number):
   const before = fullText.substring(0, matchIndex).trim();
 
   // If 'no' is not followed by a Portuguese location or setting noun, it cannot be the preposition "no"
-  if (!PT_LOCATION_NOUNS_PATTERN.test(after)) {
+  const nearbyWords = after.split(/\s+/).slice(0, 4);
+  if (!nearbyWords.some((_, index) => PT_LOCATION_NOUNS_PATTERN.test(nearbyWords.slice(index).join(' ')))) {
     return false;
   }
 
@@ -182,10 +183,50 @@ const findAffirmativeTransition = (afterText: string): RegExpExecArray | null =>
       continue;
     }
 
+    // Coordinated actions remain complements of the original negation.
+    // A comma or contrast cue can start a new affirmative clause; "and holding"
+    // after "avoid wearing" cannot.
+    if (/\b(?:and|or|e|ou|nem|nor)\s*$/i.test(textBetween) &&
+        !/\b(?:but|however|mas|por[eé]m)\b/i.test(match[0])) {
+      continue;
+    }
+
     return match;
   }
 
   return null;
+};
+
+/** Match an exclusion as a phrase/role, preserving modifiers such as clothing color. */
+export const matchesPromptExclusion = (text: string, excludedPhrases: string[]): boolean => {
+  const canonical = (word: string) => {
+    const normalized = normalizeWord(word);
+    if (/^(?:clothes|clothing|garment|garments|attire|outfit|roupa|roupas)$/.test(normalized)) return 'clothing';
+    return normalized.endsWith('s') && normalized.length > 3 ? normalized.slice(0, -1) : normalized;
+  };
+  const ignored = new Set(['a', 'an', 'the', 'any', 'um', 'uma', 'wearing', 'holding', 'wielding', 'carrying', 'having', 'using', 'vestindo', 'segurando', 'usando']);
+  const words = text.split(/[^a-zA-Z0-9\u00C0-\u00FF]+/).map(canonical).filter(Boolean);
+  // Modifiers can occur inside an excluded noun phrase (black ceremonial
+  // clothing). A different color, rendering role or relation ends that phrase.
+  const boundaries = new Set(['with', 'on', 'over', 'under', 'in', 'of', 'and', 'but', 'com', 'sobre', 'linework', 'lineart', 'outline', 'contour', 'light', 'lighting', 'shadow', 'shading', 'black', 'white', 'red', 'blue', 'green', 'gold', 'silver', 'crimson']);
+  return excludedPhrases.some(phrase => {
+    const required = phrase.split(/\s+/).map(canonical).filter(word => word && !ignored.has(word));
+    if (required.length === 0) return false;
+    return words.some((word, index) => {
+      if (word !== required[0]) return false;
+      let position = index + 1;
+      for (const target of required.slice(1)) {
+        let skipped = 0;
+        while (position < words.length && words[position] !== target && skipped < 2 && !boundaries.has(words[position])) {
+          position++;
+          skipped++;
+        }
+        if (words[position] !== target) return false;
+        position++;
+      }
+      return true;
+    });
+  });
 };
 
 /**

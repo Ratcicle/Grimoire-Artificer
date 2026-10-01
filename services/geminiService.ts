@@ -1,4 +1,5 @@
-import { GoogleGenAI, Type } from "@google/genai";
+import { createGeminiClient, hasHostRuntimeCredential } from "./geminiTransport";
+import { Type } from "@google/genai";
 import { 
   CardGenerationRequest, 
   CardType, 
@@ -13,6 +14,7 @@ import {
   VisualDNAPatch
 } from "../types";
 import { getLocalDNA } from "./localDbService";
+import { captureDnaOperationContext, assertDnaOperationContext } from './dnaAccountContext';
 import { getAutomaticReferences, getMatchingLogs, resolveManualReferences, synthesizeVisualDNA } from "./visualDnaEngine";
 import { parsePromptIntent } from "./promptParser";
 import { 
@@ -206,6 +208,7 @@ export const VISUAL_DNA_RESPONSE_SCHEMA = {
 
 export interface GenerationResult {
   imageUrl: string;
+  visualDbStatus?: GeneratedCard['visualDbStatus'];
   injectedPromptBlock?: string;
   usedReferences?: { id: string; name: string }[];
   selectedReferences?: { id: string; name: string }[];
@@ -273,9 +276,9 @@ export const buildCardPrompt = (
   `;
 };
 
-export const generateCardArt = async (request: CardGenerationRequest): Promise<GenerationResult> => {
+export const generateCardArt = async (request: CardGenerationRequest, onRequest?: (attempted?: boolean) => void): Promise<GenerationResult> => {
   // Always create a new instance to pick up the latest selected key
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+  const ai = createGeminiClient(onRequest);
 
   let injectedPromptBlock = "";
   let usedReferences: { id: string; name: string }[] = [];
@@ -283,14 +286,18 @@ export const generateCardArt = async (request: CardGenerationRequest): Promise<G
   let contributingReferences: { id: string; name: string }[] = [];
   let autoSelectScores: MatchingScoreLog[] = [];
   let synthDebug: SynthesisDebug | undefined;
+  let visualDbStatus: GeneratedCard['visualDbStatus'] = request.useVisualDB ? 'no-selection' : 'disabled';
+  const context = captureDnaOperationContext();
 
   if (request.useVisualDB) {
     try {
-      const allDna = await getLocalDNA();
+      const allDna = await getLocalDNA(context.ownerId);
+      assertDnaOperationContext(context);
+      if (allDna.length === 0) visualDbStatus = 'empty';
       let matchedRefs: VisualDNA[] = [];
       
       if (request.dbAutoSelect) {
-        matchedRefs = getAutomaticReferences(request.subject, request.cardType, request.archetype, allDna, request.dbMaxReferences || 3);
+        matchedRefs = getAutomaticReferences(request.subject, request.cardType, request.archetype, allDna, request.dbMaxReferences || 3, request.context);
       } else if (request.dbManualReferenceIds && request.dbManualReferenceIds.length > 0) {
         matchedRefs = resolveManualReferences(request.dbManualReferenceIds, allDna, request.dbMaxReferences || 3);
       }
@@ -300,7 +307,7 @@ export const generateCardArt = async (request: CardGenerationRequest): Promise<G
       
       if (request.dbAutoSelect && allDna.length > 0) {
         const selectedIds = limitedRefs.map(r => r.id);
-        autoSelectScores = getMatchingLogs(request.subject, request.cardType, request.archetype, allDna, selectedIds, maxRefs);
+        autoSelectScores = getMatchingLogs(request.subject, request.cardType, request.archetype, allDna, selectedIds, maxRefs, request.context);
       }
       
       if (limitedRefs.length > 0) {
@@ -320,10 +327,11 @@ export const generateCardArt = async (request: CardGenerationRequest): Promise<G
         usedReferences = synth.usedReferences;
         selectedReferences = synth.selectedReferences;
         contributingReferences = synth.contributingReferences;
+        visualDbStatus = contributingReferences.length ? 'contributing' : 'filtered';
         synthDebug = synth.debugInfo || undefined;
       }
     } catch (dbErr) {
-      console.error("Error fetching or synthesizing visual DNA:", dbErr);
+      throw new Error("Artstyle Database indisponível. Corrija a leitura local ou desative seu uso explicitamente antes de gerar.", { cause: dbErr });
     }
   }
 
@@ -368,7 +376,7 @@ export const generateCardArt = async (request: CardGenerationRequest): Promise<G
     parts.push({ text: fullPrompt });
 
     
-const response = await ai.models.generateContent({
+    const response = await ai.models.generateContent({
       model: request.model,
       contents: {
         parts: parts,
@@ -386,13 +394,14 @@ const response = await ai.models.generateContent({
     const usageMetadata = response.usageMetadata;
     
     // Find image part
-    if (content.parts) {
+    if (content?.parts) {
       for (const part of content.parts) {
         if (part.inlineData && part.inlineData.data) {
           const base64Data = part.inlineData.data;
           const mimeType = part.inlineData.mimeType || 'image/png';
           return {
             imageUrl: `data:${mimeType};base64,${base64Data}`,
+            visualDbStatus,
             injectedPromptBlock,
             usedReferences,
             selectedReferences,
@@ -433,9 +442,10 @@ export class GeminiOperationError extends Error {
 export const analyzeReferenceImage = async (
   base64Image: string,
   fileName: string,
-  modelName: string = "gemini-3.5-flash"
+  modelName: string = "gemini-3.5-flash",
+  onRequest?: (attempted?: boolean) => void
 ): Promise<{ data: Partial<VisualDNA>; patch?: VisualDNAPatch; usageMetadata?: any }> => {
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+  const ai = createGeminiClient(onRequest);
   
   let base64Data = base64Image;
   let mimeType = 'image/png';
@@ -661,19 +671,20 @@ export const checkApiKey = async (): Promise<boolean> => {
     return false;
   }
   if (typeof window !== 'undefined' && window.aistudio) {
-    return await window.aistudio.hasSelectedApiKey();
+    if (!await window.aistudio.hasSelectedApiKey()) return false;
+    if (hasHostRuntimeCredential()) return true;
   }
-  return localStorage.getItem("apiKeyConnected") === "true";
+  try { const response = await fetch("/api/gemini/status"); return response.ok && (await response.json()).configured === true; } catch { return false; }
 };
 
 export const promptApiKeySelection = async (): Promise<void> => {
   localStorage.removeItem("apiKeyDisconnected");
   if (typeof window !== 'undefined' && window.aistudio) {
     await window.aistudio.openSelectKey();
-    return;
+    if (await checkApiKey()) return;
+    throw new Error('A chave foi selecionada no AI Studio, mas o transporte do host não está disponível. Configure o endpoint no servidor do host.');
   }
-  localStorage.setItem("apiKeyConnected", "true");
-  return;
+  if (!await checkApiKey()) throw new Error("Sem configuração local. Configure GEMINI_API_KEY somente no servidor ou use o AI Studio.");
 };
 
 export const disconnectApiKey = async (): Promise<void> => {
@@ -689,11 +700,11 @@ export const disconnectApiKey = async (): Promise<void> => {
 };
 
 export const mapUsageMetadata = (usageMetadata: any) => ({
-  promptTokenCount: usageMetadata?.promptTokenCount || 0,
-  candidatesTokenCount: usageMetadata?.candidatesTokenCount || 0,
-  thoughtsTokenCount: usageMetadata?.thoughtsTokenCount || 0,
-  totalTokenCount: usageMetadata?.totalTokenCount || 0,
-  cachedContentTokenCount: usageMetadata?.cachedContentTokenCount || 0,
-  toolUsePromptTokenCount: usageMetadata?.toolUsePromptTokenCount || 0,
+  promptTokenCount: usageMetadata?.promptTokenCount,
+  candidatesTokenCount: usageMetadata?.candidatesTokenCount,
+  thoughtsTokenCount: usageMetadata?.thoughtsTokenCount,
+  totalTokenCount: usageMetadata?.totalTokenCount,
+  cachedContentTokenCount: usageMetadata?.cachedContentTokenCount,
+  toolUsePromptTokenCount: usageMetadata?.toolUsePromptTokenCount,
   rawUsageMetadata: usageMetadata || null
 });

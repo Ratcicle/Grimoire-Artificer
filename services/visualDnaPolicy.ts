@@ -1,10 +1,11 @@
 import { Archetype, Context, CardType, Complexity, VisualDNA, ContributionEvaluation } from "../types";
-import { parsePromptIntent } from "./promptParser";
+import { parsePromptIntent, matchesPromptExclusion } from "./promptParser";
 
 export interface SynthesisContext {
   subject: string;
   affirmativeText: string;
   excludedWords: Set<string>;
+  excludedPhrases?: string[];
   cardType: CardType | string;
   context: Context | string;
   complexity: Complexity | string;
@@ -18,6 +19,8 @@ export interface ArchetypePolicyRules {
   signatureTerms: string[];
   allowedClothingColors?: string[];
   allowedMaterials?: string[];
+  allowedAccentColors?: string[];
+  allowedPaletteColors?: string[];
   avoidRealismOrMicrodetails?: boolean;
 }
 
@@ -33,6 +36,9 @@ const NORMALIZE = (text: string): string => {
 };
 
 const escapeRegex = (s: string) => s.replace(/[.*+?^\${}()|[\]\\]/g, "\\$&");
+
+const containsTerm = (text: string, term: string): boolean =>
+  new RegExp(`(^|\\s)${escapeRegex(NORMALIZE(term))}($|\\s)`, 'i').test(NORMALIZE(text));
 
 /**
  * Explicit local runtime rules derived from the archetype presets in constants.ts.
@@ -83,7 +89,7 @@ export const ARCHETYPE_POLICY_RULES: Record<string, ArchetypePolicyRules> = {
     ],
     signatureTerms: [
       "gothic", "cathedral", "black", "graphite", "maroon", "crimson",
-      "rose red", "crystal heart", "demonic", "spikes", "thorns", "vortex"
+      "rose red", "crystal heart", "demonic", "spikes", "thorns", "vortex", "pointed arches"
     ],
     allowedClothingColors: [
       "black", "graphite", "charcoal", "maroon", "crimson", "dark red", "rose red", "purple"
@@ -126,7 +132,8 @@ export const ARCHETYPE_POLICY_RULES: Record<string, ArchetypePolicyRules> = {
     ],
     signatureTerms: [
       "robotic", "modular", "angular", "plating", "reactor", "joint", "visor"
-    ]
+    ],
+    allowedAccentColors: ['orange', 'red', 'yellow', 'lime', 'green', 'violet', 'magenta', 'cobalt blue', 'cyan']
   },
   [Archetype.Bloomrot]: {
     forbiddenTerms: [
@@ -150,7 +157,7 @@ export const ARCHETYPE_POLICY_RULES: Record<string, ArchetypePolicyRules> = {
       "void corruption", "tentacles", "blood", "cathedral"
     ],
     signatureTerms: [
-      "robe", "runes", "glyphs", "academic", "geometric", "staff", "grimoire"
+      "robe", "runes", "glyphs", "academic", "geometric", "staff", "grimoire", "circuits"
     ]
   },
   [Archetype.Voidwalkers]: {
@@ -173,6 +180,126 @@ export const ARCHETYPE_POLICY_RULES: Record<string, ArchetypePolicyRules> = {
     forbiddenTerms: [],
     signatureTerms: []
   }
+};
+
+// Palette permissions follow the existing presets. Accent permission does not
+// promote a color into a dominant palette or require it in every generated card.
+const PRESET_COLOR_ROLES: Partial<Record<Archetype, { palette: string[]; accent: string[] }>> = {
+  [Archetype.RoyalCarmine]: { palette: ['white', 'ivory', 'almond', 'pearl', 'silver', 'gold'], accent: ['crimson', 'red', 'gold', 'golden', 'silver', 'white', 'ivory'] },
+  [Archetype.ShadowHeart]: { palette: ['black', 'graphite', 'gray', 'maroon', 'crimson', 'rose red', 'magenta', 'pink'], accent: ['crimson', 'red', 'magenta', 'pink'] },
+  [Archetype.Voidwalkers]: { palette: ['black', 'charcoal gray', 'blue gray', 'bone white', 'purple'], accent: ['cyan', 'teal'] },
+  [Archetype.LuminarchKnights]: { palette: ['white', 'silver', 'petrol blue', 'teal'], accent: ['gold', 'golden', 'cyan', 'aqua green'] },
+  [Archetype.ZodiacTalismans]: { palette: ['gold', 'black', 'red', 'stone', 'parchment', 'earth'], accent: ['gold', 'black', 'red'] },
+  [Archetype.Miragebound]: { palette: ['sand', 'ivory', 'beige', 'bronze', 'gold', 'amber', 'teal', 'turquoise'], accent: ['cyan', 'gold', 'amber', 'turquoise'] },
+  [Archetype.Bloomrot]: { palette: ['ivory', 'beige', 'white', 'yellow', 'amber', 'orange', 'red', 'crimson', 'purple', 'lilac', 'violet', 'magenta', 'pink', 'cyan', 'blue', 'green', 'teal', 'lime', 'brown', 'gray', 'black'], accent: ['cyan', 'blue', 'yellow', 'green', 'amber', 'violet', 'magenta', 'orange'] },
+  [Archetype.BurningWest]: { palette: ['brown', 'charcoal black', 'gray', 'beige', 'dark iron', 'muted orange', 'crimson', 'red', 'maroon'], accent: ['orange', 'yellow'] }
+};
+for (const [archetype, roles] of Object.entries(PRESET_COLOR_ROLES)) {
+  ARCHETYPE_POLICY_RULES[archetype].allowedPaletteColors = roles.palette;
+  ARCHETYPE_POLICY_RULES[archetype].allowedAccentColors = roles.accent;
+}
+
+// Basic illustration terms and grammar. Descriptive words are also admitted by
+// their technical role below; this is not a list of every word an analyzer may use.
+const TECHNIQUE_WORDS = new Set(`a an the and or of with in on over under to by for from at as but only
+  clean tapered crisp fine sharp bold delicate flowing calligraphic line lineart linework outline outlines contour contours ink strokes cross hatching
+  soft cel cell smooth gradient gradients digital matte specular volumetric shading painting rendering finish highlight highlights glow
+  rim light lighting backlight backlighting point bounce key directional ambient occlusion chiaroscuro high contrast shadows shadow dark black
+  falloff tonal balance value hierarchy depth layering subject background separation atmospheric perspective field rule thirds golden ratio
+  dynamic angle angles low cinematic foreshortening foreground framing focal leading lines reflection reflections treatment subsurface scattering
+  readable silhouette iconic triadic balancing complementary detail details distribution selective detailing restraint composition texture textures
+  polished precise elegant thin well defined deep strong subtle small accents accent dominant embroidered embroidery trim sheen luster drape drapery
+  folds smoothness luxurious mother internal softer hard edged metallic sketchy watercolor wash multi layered anisotropic
+  static symmetrical central diagonal visual flow balanced secondary opposing mass proportional natural proportions form scale standard
+  vertical horizontal asymmetrical geometric shapes graphic comic anime stylized saturated colors color luminous transitions broad bright
+  expressive curved curves rounded angular shapes surface surfaces material behavior painterly vibrant palette
+  dense sparse placement motion pose movement wide close up full shot centered balanced central negative space volume lightness`.split(/\s+/));
+
+const evidenceWords = (text: string): Set<string> => {
+  const words = new Set(NORMALIZE(text).split(/\s+/));
+  for (const word of [...words]) {
+    if (word.endsWith('s') && word.length > 3) words.add(word.slice(0, -1));
+    else if (word.length > 3) words.add(word + 's');
+    if (word === 'gold') words.add('golden');
+  }
+  if ([...words].some(word => ['human', 'noble', 'knight', 'mage', 'person', 'nobre', 'humano'].includes(word))) {
+    ['human', 'hands', 'hand'].forEach(word => words.add(word));
+  }
+  if (words.has('colossal') || words.has('gargantuan')) ['towering', 'mountain', 'sized', 'beast', 'monster'].forEach(word => words.add(word));
+  if ([...words].some(word => ['silk', 'satin', 'cotton', 'linen', 'wool', 'fabric', 'cloth'].includes(word))) ['fabric', 'cloth'].forEach(word => words.add(word));
+  return words;
+};
+
+const TECHNICAL_HEADS = new Set(`linework lineart line lines outline outlines contour contours ink stroke strokes hatching shading lighting light highlights shadows painting rendering gradients gradient brushwork edge edges detail details areas shapes silhouette framing composition contrast hierarchy depth layers textures`.split(' '));
+const TECHNICAL_RELATIONS = new Set(['use', 'uses', 'create', 'creates', 'emphasize', 'emphasizes', 'produce', 'produces', 'keep', 'keeps']);
+const TECHNICAL_MEDIA = new Set(['pencil', 'charcoal', 'pastel', 'gouache', 'acrylic', 'watercolor']);
+const GRAMMATICAL_BOUNDARIES = new Set(['with', 'and', 'in', 'on', 'over', 'under', 'of', 'to', 'for', 'from']);
+const TECHNICAL_MODIFIERS = [
+  { pattern: /^(?:stippled|feathered|hatched|crosshatched|tapered|smudged|brushed)$/, heads: new Set('linework lineart lines outlines contours ink strokes hatching shading painting rendering gradients gradient brushwork edge edges'.split(' ')) },
+  { pattern: /^(?:illuminated|diffused|diffuse|backlit|lit)$/, heads: new Set('lighting light highlights shadows areas edges contours shapes'.split(' ')) },
+  { pattern: /^(?:blended|layered|contrasted|graduated|stylized|stylised|desaturated|saturated|focused|detailed|polished|softly|sharply|subtly|boldly|finely|smoothly|cleanly|lightly|darkly)$/, heads: TECHNICAL_HEADS }
+];
+
+const isTechnicalComparative = (word: string) => ['er', 'est', 'r', 'st'].some(ending => word.endsWith(ending) &&
+  (TECHNIQUE_WORDS.has(word.slice(0, -ending.length)) || word.slice(0, -ending.length) === 'quiet'));
+
+/** A descriptive modifier needs an illustration head, not a body/material noun. */
+const hasTechnicalRole = (tokens: string[], index: number): boolean => {
+  const word = tokens[index];
+  if (TECHNICAL_HEADS.has(word)) return true;
+  const comparative = isTechnicalComparative(word);
+  const modifier = TECHNICAL_MODIFIERS.find(family => family.pattern.test(word));
+  const descriptive = Boolean(modifier) || comparative;
+  const relation = TECHNICAL_RELATIONS.has(word);
+  if (!descriptive && !relation && !TECHNICAL_MEDIA.has(word)) return false;
+  const acceptsHead = (head: string) => TECHNICAL_HEADS.has(head) && (!modifier || modifier.heads.has(head));
+
+  // Follow a short adjective/verb phrase to its technique head. Prepositions and
+  // unknown noun phrases end the role, so "feathered brushwork" is transferable
+  // while "feathered wings with linework" still requires support for wings.
+  for (let next = index + 1; next < Math.min(tokens.length, index + 5); next++) {
+    const token = tokens[next];
+    if (GRAMMATICAL_BOUNDARIES.has(token)) break;
+    if (TECHNICAL_HEADS.has(token)) return acceptsHead(token);
+    if (!TECHNIQUE_WORDS.has(token) && !isTechnicalComparative(token) && !TECHNICAL_MODIFIERS.some(family => family.pattern.test(token))) break;
+  }
+  // Participles also describe the relationship between two technique phrases:
+  // "focal detail contrasted with quieter background shapes".
+  return descriptive && index > 0 && acceptsHead(tokens[index - 1]);
+};
+
+const hasPositiveAdmission = (text: string, context: SynthesisContext, rules: ArchetypePolicyRules, field?: string): boolean => {
+  const support = evidenceWords([context.affirmativeText, ...rules.signatureTerms, ...(rules.allowedMaterials || []), ...(rules.allowedClothingColors || []), ...(rules.allowedAccentColors || []), ...(rules.allowedPaletteColors || [])].join(' '));
+  if (rules.allowedClothingColors?.length) ['clothing', 'clothes', 'garments', 'attire'].forEach(word => support.add(word));
+  const content = NORMALIZE(text)
+    .replace(/\b(?:three|3) point lighting\b/g, 'lighting')
+    .replace(/\b(?:variable|uniform|varying|consistent) weight (?=linework|lines|contours)/g, '')
+    .replace(/\bfull body (?:shot|framing|composition)\b/g, 'framing');
+  const tokens = content.split(/\s+/);
+  if (!NORMALIZE(text).includes(' ') && !support.has(content) && !isTransferableTechnique(content) &&
+      !['shading', 'lighting', 'rendering', 'brushwork', 'hatching', 'foreshortening'].includes(content)) {
+    return false;
+  }
+  if (field === 'substanceMaterials' || field === 'substanceElements') {
+    // These fields declare what a subject is made of or which element it uses.
+    // "Light" and "shadow" here cannot borrow their lighting/shading meanings.
+    const nounPhrase = content.split(/\b(?:with|in|on|over)\b/)[0].trim().split(/\s+/);
+    if (!support.has(nounPhrase[nounPhrase.length - 1])) return false;
+  }
+  // Words such as light, shadow and metallic describe techniques only in a
+  // rendering role. When they modify anatomy, the modifier needs content
+  // evidence too. A technique vocabulary must not certify a new body substance.
+  const anatomyPhrases = content.matchAll(/\b((?:[a-z]+\s+){0,3})(body|arms?|hands?|legs?|heads?|skin|wings?|eyes?|flesh|bones?)\b/g);
+  for (const phrase of anatomyPhrases) {
+    const modifiers = phrase[1].trim().split(/\s+/);
+    let boundary = -1;
+    modifiers.forEach((word, index) => {
+      if (['on', 'over', 'with', 'and', 'of', 'in', 'the', 'a', 'an'].includes(word)) boundary = index;
+    });
+    const attached = modifiers.slice(boundary + 1).filter(Boolean);
+    if (!attached.every(word => support.has(word) || ['proportional', 'natural'].includes(word))) return false;
+  }
+  return tokens.every((word, index) => TECHNIQUE_WORDS.has(word) || support.has(word) || hasTechnicalRole(tokens, index));
 };
 
 /**
@@ -339,7 +466,11 @@ export const checkSingleClauseCompatibility = (
   const words = normClause.split(/\s+/);
 
   // 1. User Negative Exclusions (PromptParser)
-  if (context.excludedWords && context.excludedWords.size > 0) {
+  const exclusions = context.excludedPhrases ?? parsePromptIntent(context.subject).excludedPhrases;
+  if (matchesPromptExclusion(clauseText, exclusions)) {
+    return { compatible: false, reason: 'Matches a contextual user exclusion.' };
+  }
+  if (exclusions.length === 0 && context.excludedWords && context.excludedWords.size > 0) {
     for (const w of words) {
       if (context.excludedWords.has(w)) {
         return {
@@ -431,7 +562,7 @@ export const checkSingleClauseCompatibility = (
         }
 
         // Exception: if the user EXPLICITLY requested this term in their affirmative description, prompt prevails
-        if (normSubject.includes(normTerm)) {
+        if (containsTerm(normSubject, normTerm)) {
           continue;
         }
 
@@ -446,7 +577,7 @@ export const checkSingleClauseCompatibility = (
   // Explicit check for Royal Carmine: blood splatter / pools of blood / gore is strictly forbidden even if "blood pact" is nearby
   if (context.archetype === Archetype.RoyalCarmine) {
     if (/\b(?:blood\s*splatter|pools?\s+of\s+blood|excessive\s+blood|gore|bloody\s+floor|blood\s+dripping)\b/i.test(clauseText)) {
-      if (!normSubject.includes("blood splatter") && !normSubject.includes("gore")) {
+      if (!containsTerm(normSubject, "blood splatter") && !containsTerm(normSubject, "gore")) {
         return {
           compatible: false,
           reason: "Conflicts with Royal Carmine preset forbidding blood splatter, pools of blood, and gore."
@@ -475,7 +606,7 @@ export const checkSingleClauseCompatibility = (
     const isDarkMaterial = /\b(?:obsidian|black\s+iron|dark\s+steel|gothic\s+armor|dark\s+armor)\b/i.test(clauseText);
 
     if ((isBlackDarkAttire || isDarkMaterial) && !isLineworkOnly && !hasWhiteAttire) {
-      if (!normSubject.includes("black armor") && !normSubject.includes("armadura preta")) {
+      if (!containsTerm(normSubject, "black armor") && !containsTerm(normSubject, "armadura preta")) {
         return {
           compatible: false,
           reason: `Imposes black/gothic armor or dark materials onto a subject requested in white silk or Royal Carmine.`
@@ -487,7 +618,7 @@ export const checkSingleClauseCompatibility = (
   // 6. Colossal Scale imposition onto humans (MUST check before transferable fast-track)
   if (/\b(?:colossal|gargantuan|mountain[- ]sized|towering\s+over\s+cities)\b/i.test(normClause)) {
     const isHumanEntity = /\b(?:human|noble|mage|wizard|knight|cleric|scholar|artificer|person)\b/i.test(normSubject);
-    if (isHumanEntity && !normSubject.includes("colossal") && !normSubject.includes("gargantuan")) {
+    if (isHumanEntity && !containsTerm(normSubject, "colossal") && !containsTerm(normSubject, "gargantuan")) {
       return {
         compatible: false,
         reason: "Imposes colossal/gargantuan scale onto a human entity."
@@ -587,7 +718,7 @@ export const checkSingleClauseCompatibility = (
     // 4. Accent / trim / embroidery / gemstone / detail / seals
     if (
       /^\s*(?:(?:embroidered\s+)?accents?|trim(?:s|mings?)?|embroidery|embroidered|gemstones?|gems?|jewels?|jewelry|filigree|seals?|symbols?|runes?|markings?|details?)\b/i.test(textAfter) ||
-      /\b(?:accents?|trim(?:s)?|embroidery|gemstones?|gems?|jewels?)\s+(?:in|of|with)\s*$/i.test(textBefore) ||
+      /\b(?:accents?|trim(?:s)?|embroidery|gemstones?|gems?|jewels?|seals?|symbols?|runes?)\s+(?:in|of|with)\s*$/i.test(textBefore) ||
       (/\b(?:small|subtle|delicate|minor)\s*$/i.test(textBefore) && /^\s*(?:gemstones?|gems?|jewels?|accents?|details?|seals?)\b/i.test(textAfter))
     ) {
       return 'accent';
@@ -627,7 +758,7 @@ export const checkSingleClauseCompatibility = (
     return 'clothing';
   };
 
-  if (occurrences.length > 0 && (isPaletteField || specifiesClothing || specifiesDominantPalette || isConditionalFeature(clauseText))) {
+  if (occurrences.length > 0) {
     for (const occ of occurrences) {
       const col = occ.color;
       const textBefore = clauseText.slice(0, occ.index);
@@ -636,7 +767,7 @@ export const checkSingleClauseCompatibility = (
 
       // Linework / outlines: transferable illustration technique
       if (role === 'linework') {
-        if (context.excludedWords?.has(col)) {
+        if (matchesPromptExclusion(`${col} linework`, exclusions)) {
           return {
             compatible: false,
             reason: `Linework color '${col}' is excluded by user.`
@@ -647,18 +778,21 @@ export const checkSingleClauseCompatibility = (
 
       // Lighting / rim light: transferable lighting technique
       if (role === 'lighting') {
-        if (context.excludedWords?.has(col)) {
+        if (matchesPromptExclusion(`${col} lighting`, exclusions)) {
           return {
             compatible: false,
             reason: `Lighting color '${col}' is excluded by user.`
           };
         }
+        const supported = ['white', 'gold', 'golden', 'black', 'gray', 'grey'].includes(col) || containsTerm(normSubject, col) ||
+          [...archetypeRules.signatureTerms, ...(archetypeRules.allowedAccentColors || [])].some(term => containsTerm(term, col));
+        if (!supported) return { compatible: false, reason: `Lighting color '${col}' has no affirmative support.` };
         continue;
       }
 
       // Shadow / shading: transferable technique
       if (role === 'shadow') {
-        if (context.excludedWords?.has(col)) {
+        if (matchesPromptExclusion(`${col} shading`, exclusions)) {
           return {
             compatible: false,
             reason: `Shadow color '${col}' is excluded by user.`
@@ -677,9 +811,9 @@ export const checkSingleClauseCompatibility = (
             };
           }
         } else {
-          const inPrompt = normSubject.includes(col);
-          const inArchetype = archetypeRules.allowedClothingColors?.some(ac => NORMALIZE(ac).includes(col)) ||
-                              archetypeRules.signatureTerms?.some(st => NORMALIZE(st).includes(col));
+          const inPrompt = containsTerm(normSubject, col);
+          const inArchetype = archetypeRules.allowedClothingColors?.some(ac => containsTerm(ac, col)) ||
+                              archetypeRules.signatureTerms?.some(st => containsTerm(st, col));
           if (!inPrompt && !inArchetype) {
             return {
               compatible: false,
@@ -694,16 +828,16 @@ export const checkSingleClauseCompatibility = (
       if (role === 'clothing') {
         if (isWhiteSilkRequest || context.archetype === Archetype.RoyalCarmine) {
           const isWhiteAttireColor = ["white", "snow white", "ivory", "almond", "cream", "pearl", "silver"].includes(col);
-          if (!isWhiteAttireColor && !normSubject.includes(col)) {
+          if (!isWhiteAttireColor && !containsTerm(normSubject, col)) {
             return {
               compatible: false,
               reason: `Clothing color ('${col}') contradicts requested white attire and ${context.archetype} palette.`
             };
           }
         } else {
-          const inPrompt = normSubject.includes(col);
-          const inArchetype = archetypeRules.allowedClothingColors?.some(ac => NORMALIZE(ac).includes(col)) ||
-                              archetypeRules.signatureTerms?.some(st => NORMALIZE(st).includes(col));
+          const inPrompt = containsTerm(normSubject, col);
+          const inArchetype = archetypeRules.allowedClothingColors?.some(ac => containsTerm(ac, col)) ||
+                              archetypeRules.signatureTerms?.some(st => containsTerm(st, col));
           if (!inPrompt && !inArchetype) {
             return {
               compatible: false,
@@ -716,11 +850,12 @@ export const checkSingleClauseCompatibility = (
 
       // Accent / gemstone / trim:
       if (role === 'accent') {
-        const inPrompt = normSubject.includes(col);
+        const inPrompt = containsTerm(normSubject, col);
         const inArchetype =
           (context.archetype === Archetype.RoyalCarmine && ["crimson", "ruby", "red", "gold", "golden", "silver", "ivory", "white"].includes(col)) ||
-          archetypeRules.signatureTerms?.some(st => NORMALIZE(st).includes(col)) ||
-          archetypeRules.allowedClothingColors?.some(ac => NORMALIZE(ac).includes(col));
+          archetypeRules.allowedAccentColors?.some(color => containsTerm(color, col)) ||
+          archetypeRules.signatureTerms?.some(st => containsTerm(st, col)) ||
+          archetypeRules.allowedClothingColors?.some(ac => containsTerm(ac, col));
 
         if (!inPrompt && !inArchetype) {
           return {
@@ -733,11 +868,12 @@ export const checkSingleClauseCompatibility = (
 
       // Palette (primary/dominant palette in paletteLogic or palette field):
       if (role === 'palette') {
-        const inPrompt = normSubject.includes(col);
+        const inPrompt = containsTerm(normSubject, col);
         const inArchetype =
           (context.archetype === Archetype.RoyalCarmine && ["white", "snow white", "ivory", "almond", "cream", "pearl", "silver"].includes(col)) ||
-          archetypeRules.allowedClothingColors?.some(ac => NORMALIZE(ac).includes(col) && ac !== "crimson") ||
-          archetypeRules.signatureTerms?.some(st => NORMALIZE(st).includes(col) && st !== "crimson");
+          (archetypeRules.allowedPaletteColors
+            ? archetypeRules.allowedPaletteColors.some(color => containsTerm(color, col))
+            : archetypeRules.allowedClothingColors?.some(ac => containsTerm(ac, col)) || archetypeRules.signatureTerms?.some(st => containsTerm(st, col)));
 
         if (!inPrompt && !inArchetype) {
           return {
@@ -755,8 +891,8 @@ export const checkSingleClauseCompatibility = (
         const matMatches = clauseText.match(/\b(?:velvet|leather|obsidian|iron)\b/gi) || [];
         for (const mat of matMatches) {
           const normMat = NORMALIZE(mat);
-          const inPrompt = normSubject.includes(normMat);
-          const inArchetype = archetypeRules.allowedMaterials.some(am => NORMALIZE(am).includes(normMat));
+          const inPrompt = containsTerm(normSubject, normMat);
+          const inArchetype = archetypeRules.allowedMaterials.some(am => containsTerm(am, normMat));
           if (!inPrompt && !inArchetype) {
             return {
               compatible: false,
@@ -766,6 +902,10 @@ export const checkSingleClauseCompatibility = (
         }
       }
     }
+  }
+
+  if (!hasPositiveAdmission(clauseText, context, archetypeRules, field)) {
+    return { compatible: false, reason: 'Conditional content has no affirmative support in the subject or preset.' };
   }
 
   // 10. Transferable technique check (only if all conditional checks have passed and no conflicting content exists)
@@ -801,7 +941,7 @@ export const evaluateCandidateFragment = (
   field: string,
   ref: VisualDNA,
   context: SynthesisContext
-): { decision: "included" | "discarded"; text: string; originalText: string; reason: string; blockedIdentity?: string; blockedIdentities?: string[] } => {
+): { decision: "included" | "discarded"; text: string; originalText: string; reason: string; blockedIdentity?: string; blockedIdentities?: string[]; rejectedClauses?: { text: string; reason: string }[] } => {
   if (!rawFragment || typeof rawFragment !== "string" || !rawFragment.trim()) {
     return {
       decision: "discarded",
@@ -839,6 +979,7 @@ export const evaluateCandidateFragment = (
 
   if (subClauses.length > 1) {
     const acceptedClauses: string[] = [];
+    const rejectedClauses: { text: string; reason: string }[] = [];
     let lastDiscardReason = "";
 
     for (const clause of subClauses) {
@@ -847,6 +988,7 @@ export const evaluateCandidateFragment = (
         acceptedClauses.push(clause);
       } else {
         lastDiscardReason = clauseRes.reason;
+        rejectedClauses.push({ text: clause, reason: clauseRes.reason });
       }
     }
 
@@ -862,7 +1004,8 @@ export const evaluateCandidateFragment = (
             ? `Kept compatible portion (${finalKept}) after filtering conflicting content.`
             : "Compatible visual guidance.",
         blockedIdentity: blockedDetailsList[0],
-        blockedIdentities: blockedDetailsList
+        blockedIdentities: blockedDetailsList,
+        rejectedClauses
       };
     }
 
@@ -872,7 +1015,8 @@ export const evaluateCandidateFragment = (
       originalText: rawTrimmed,
       reason: lastDiscardReason || "Compound fragment contains incompatible conditional content.",
       blockedIdentity: blockedDetailsList[0],
-      blockedIdentities: blockedDetailsList
+      blockedIdentities: blockedDetailsList,
+      rejectedClauses
     };
   }
 

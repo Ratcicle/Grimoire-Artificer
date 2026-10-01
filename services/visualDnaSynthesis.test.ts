@@ -244,7 +244,7 @@ describe("Rodada 2: Síntese do Visual DNA - Acceptance Tests (A through K)", ()
     vi.spyOn(localDbService, "getLocalDNA").mockResolvedValue([blackArmorRef]);
 
     const req: CardGenerationRequest = {
-      subject: "A dark warrior in black armor",
+      subject: "A dark warrior in black iron plate armor",
       cardType: CardType.Monster,
       context: Context.Character,
       complexity: Complexity.Medium,

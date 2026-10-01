@@ -3,8 +3,9 @@ import {
   ALL_CANONICAL_DIMENSIONS,
   isCalibratedRecord,
   ALLOWED_VISUAL_TAGS,
-  getTagCategory
-} from './visualTags';
+  getTagCategory, VISUAL_TAG_PRIORITY, VISUAL_TAG_CATEGORIES,
+  normalizeProfileBlocks, normalizeSubjects, normalizeScaleRelationships
+} from './visualDnaContracts';
 
 export const CLEARABLE_ANALYTICAL_FIELDS = [
   // Analytical strings
@@ -37,6 +38,25 @@ const ARRAY_STRING_FIELDS = [
   'stylePromptFragments', 'contentMotifs', 'identitySpecificDetails',
   'universalQualityAvoids', 'styleSpecificAvoids', 'contentSpecificAvoids'
 ] as const;
+
+// A score describes these technical fields together, including advanced descriptions.
+const DESCRIPTION_FIELDS_BY_DIMENSION: Record<typeof ALL_CANONICAL_DIMENSIONS[number], readonly string[]> = {
+  rendering: ['rendering', 'linework'],
+  composition: ['composition', 'framing', 'hierarchy', 'focalAnchors', 'compositionRecipe'],
+  palette: ['palette', 'paletteLogic'],
+  lighting: ['lighting'],
+  materials: ['materials', 'materialBehavior', 'substanceProfile'],
+  background: ['background'],
+  details: ['details', 'detailPlacement'],
+  effects: ['effects', 'energyDesign'],
+  pose: ['pose'],
+  silhouette: ['silhouette', 'shapeLanguage'],
+  style: ['styleAnchors', 'stylePromptFragments', 'styleSpecificAvoids', 'avoidRules'],
+  detailDensity: ['details', 'detailPlacement']
+};
+
+const comparableDescription = (value: unknown): string => typeof value === 'string'
+  ? value.trim().replace(/\s+/g, ' ') : JSON.stringify(value ?? '');
 
 export function extractDerivedTagsFromProfiles(data: any): string[] {
   if (!data || typeof data !== 'object') return [];
@@ -127,8 +147,8 @@ export function isCompleteSubjectProfile(rawSP: any): boolean {
 
 export function isCompleteScaleProfile(rawSP: any): boolean {
   if (!rawSP || typeof rawSP !== 'object' || Array.isArray(rawSP)) return false;
-  const hasScale = typeof rawSP.physicalScale === 'string' && rawSP.physicalScale.trim().length > 0;
-  const hasPresence = typeof rawSP.perceivedPresence === 'string' && rawSP.perceivedPresence.trim().length > 0;
+  const hasScale = typeof rawSP.physicalScale === 'string' && VISUAL_TAG_CATEGORIES['Physical Scale'].includes(rawSP.physicalScale.trim().toLowerCase());
+  const hasPresence = typeof rawSP.perceivedPresence === 'string' && VISUAL_TAG_CATEGORIES['Perceived Presence'].includes(rawSP.perceivedPresence.trim().toLowerCase());
   const hasForms = isValidStringArray(rawSP.scaleForms);
   const hasCues = isValidStringArray(rawSP.scaleCues);
   const hasEvidence = typeof rawSP.evidence === 'string' && rawSP.evidence.trim().length > 0;
@@ -195,6 +215,8 @@ export function mergeVisualDNASafe(
   const inheritanceWarnings: string[] = [];
 
   const clearFields = patch.clearFields || [];
+  // Presence comes from raw; applied profile values share the normalizer's validation.
+  const normalizedProfiles = normalizeProfileBlocks(patch.raw);
 
   // Validate clearFields against whitelist, protected fields, and contradictions
   for (const field of clearFields) {
@@ -317,12 +339,8 @@ export function mergeVisualDNASafe(
     if (rawSP === null || typeof rawSP !== 'object' || Array.isArray(rawSP)) {
       throw new Error(`Tipo incompatível para subjectProfile: esperado objeto, recebido ${rawSP === null ? 'null' : Array.isArray(rawSP) ? 'array' : typeof rawSP}.`);
     }
-    if (isCompleteSubjectProfile(rawSP)) {
-      merged.subjectProfile = {
-        primarySubject: rawSP.primarySubject.trim().replace(/\s+/g, ' '),
-        subjectCategory: rawSP.subjectCategory.trim().toLowerCase().replace(/\s+/g, ' '),
-        visualRole: rawSP.visualRole.trim().toLowerCase()
-      };
+    if (isCompleteSubjectProfile(rawSP) && isCompleteSubjectProfile(normalizedProfiles.subjectProfile)) {
+      merged.subjectProfile = normalizedProfiles.subjectProfile;
       updatedFields.push('subjectProfile');
     } else {
       // Incomplete block: preserve previous profile
@@ -352,15 +370,8 @@ export function mergeVisualDNASafe(
     if (rawSP === null || typeof rawSP !== 'object' || Array.isArray(rawSP)) {
       throw new Error(`Tipo incompatível para scaleProfile: esperado objeto, recebido ${rawSP === null ? 'null' : Array.isArray(rawSP) ? 'array' : typeof rawSP}.`);
     }
-    if (isCompleteScaleProfile(rawSP)) {
-      merged.scaleProfile = {
-        physicalScale: rawSP.physicalScale.trim().toLowerCase(),
-        perceivedPresence: rawSP.perceivedPresence.trim().toLowerCase(),
-        scaleForms: rawSP.scaleForms.map((f: string) => f.trim().toLowerCase()),
-        scaleCues: rawSP.scaleCues.map((c: string) => c.trim().toLowerCase()),
-        evidence: rawSP.evidence.trim().replace(/\s+/g, ' '),
-        confidence: rawSP.confidence
-      };
+    if (isCompleteScaleProfile(rawSP) && isCompleteScaleProfile(normalizedProfiles.scaleProfile)) {
+      merged.scaleProfile = normalizedProfiles.scaleProfile;
       updatedFields.push('scaleProfile');
     } else {
       if (base?.scaleProfile) {
@@ -389,15 +400,8 @@ export function mergeVisualDNASafe(
     if (rawSP === null || typeof rawSP !== 'object' || Array.isArray(rawSP)) {
       throw new Error(`Tipo incompatível para substanceProfile: esperado objeto, recebido ${rawSP === null ? 'null' : Array.isArray(rawSP) ? 'array' : typeof rawSP}.`);
     }
-    if (isCompleteSubstanceProfile(rawSP)) {
-      merged.substanceProfile = {
-        materials: rawSP.materials.map((m: string) => m.trim().toLowerCase()),
-        surfaces: rawSP.surfaces.map((s: string) => s.trim().toLowerCase()),
-        elements: rawSP.elements.map((e: string) => e.trim().toLowerCase()),
-        elementApplications: rawSP.elementApplications.map((ea: string) => ea.trim().toLowerCase()),
-        evidence: rawSP.evidence.trim().replace(/\s+/g, ' '),
-        confidence: rawSP.confidence
-      };
+    if (isCompleteSubstanceProfile(rawSP) && isCompleteSubstanceProfile(normalizedProfiles.substanceProfile)) {
+      merged.substanceProfile = normalizedProfiles.substanceProfile;
       updatedFields.push('substanceProfile');
     } else {
       if (base?.substanceProfile) {
@@ -423,10 +427,14 @@ export function mergeVisualDNASafe(
     clearedFields.push('subjects');
   } else if ('subjects' in patch.raw) {
     if (Array.isArray(patch.raw.subjects)) {
-      merged.subjects = patch.normalized?.subjects
-        ? [...patch.normalized.subjects]
-        : [...patch.raw.subjects];
-      updatedFields.push('subjects');
+      const subjects = normalizeSubjects(patch.raw.subjects);
+      if (patch.raw.subjects.length === 0 || subjects.length > 0) {
+        merged.subjects = subjects;
+        updatedFields.push('subjects');
+      } else {
+        preservedFields.push('subjects');
+        unappliedPartialBlocks.push('subjects: proposta sem itens válidos');
+      }
     } else {
       throw new Error(`Tipo incompatível para subjects: esperado array, recebido ${typeof patch.raw.subjects}.`);
     }
@@ -444,9 +452,7 @@ export function mergeVisualDNASafe(
     clearedFields.push('scaleRelationships');
   } else if ('scaleRelationships' in patch.raw) {
     if (Array.isArray(patch.raw.scaleRelationships)) {
-      merged.scaleRelationships = patch.normalized?.scaleRelationships
-        ? [...patch.normalized.scaleRelationships]
-        : [...patch.raw.scaleRelationships];
+      merged.scaleRelationships = normalizeScaleRelationships(patch.raw.scaleRelationships);
       updatedFields.push('scaleRelationships');
     } else {
       throw new Error(`Tipo incompatível para scaleRelationships: esperado array, recebido ${typeof patch.raw.scaleRelationships}.`);
@@ -488,8 +494,15 @@ export function mergeVisualDNASafe(
     const newDerivedTags = new Set(extractDerivedTagsFromProfiles(merged));
 
     const baseTags = Array.isArray(base?.tags) ? base.tags : [];
-    // Preserve custom and core tags that were not tied to removed profile elements
-    const keptNonDerivedTags = baseTags.filter(t => !oldDerivedTags.has(t) || newDerivedTags.has(t));
+    const hasEvaluatedTags = 'tags' in patch.raw;
+    if (hasEvaluatedTags && !Array.isArray(patch.raw.tags)) {
+      throw new Error('Tipo incompatível para tags: esperado array.');
+    }
+    // Explicit lists replace canonical tags. Local custom tags and final profiles survive.
+    const keptNonDerivedTags = baseTags.filter(t =>
+      (!hasEvaluatedTags || !ALLOWED_VISUAL_TAGS.includes(t)) &&
+      (!oldDerivedTags.has(t) || newDerivedTags.has(t))
+    );
 
     const combinedTags = new Set<string>(keptNonDerivedTags);
     for (const t of newDerivedTags) {
@@ -502,23 +515,18 @@ export function mergeVisualDNASafe(
       for (const t of patch.raw.tags) {
         if (typeof t === 'string') {
           const cleanT = t.toLowerCase().trim();
-          if (ALLOWED_VISUAL_TAGS.includes(cleanT)) {
+          const removedByProfile = profilesChanged && oldDerivedTags.has(cleanT) && !newDerivedTags.has(cleanT);
+          if (ALLOWED_VISUAL_TAGS.includes(cleanT) && !removedByProfile) {
             combinedTags.add(cleanT);
           }
         }
       }
     }
 
-    const priorityOrder = [
-      'Style & Medium', 'Subject & Character', 'Materials & Textures',
-      'Elements & Magic', 'Surface & Finish', 'Physical Scale',
-      'Scale Forms', 'Scale Cues', 'Perceived Presence', 'Lighting & Color', 'Atmosphere & Framing'
-    ];
-
     const sortedTags = Array.from(combinedTags).sort((a, b) => {
       const catA = getTagCategory(a);
       const catB = getTagCategory(b);
-      return priorityOrder.indexOf(catA) - priorityOrder.indexOf(catB);
+      return VISUAL_TAG_PRIORITY.indexOf(catA as any) - VISUAL_TAG_PRIORITY.indexOf(catB as any);
     });
     merged.tags = sortedTags.slice(0, 14);
     updatedFields.push('tags');
@@ -556,11 +564,17 @@ export function mergeVisualDNASafe(
     }
   }
 
-  // Preserve omitted scores and check for description updates without score evaluation
+  // A preserved number is not a fresh evaluation of a changed description.
+  const changedWithoutEvaluation = new Set<string>();
   for (const dim of ALL_CANONICAL_DIMENSIONS) {
     if (!scoresEvaluatedInPatch.has(dim) && dim in merged.scores) {
       preservedFields.push(`scores.${dim}`);
-      if (updatedFields.includes(dim)) {
+      const descriptionChanged = DESCRIPTION_FIELDS_BY_DIMENSION[dim].some(field =>
+        (updatedFields.includes(field) || clearedFields.includes(field)) &&
+        comparableDescription(base?.[field]) !== comparableDescription(merged[field])
+      );
+      if (descriptionChanged) {
+        changedWithoutEvaluation.add(dim);
         inheritanceWarnings.push(
           `Dimensão "${dim}" teve sua descrição atualizada mas o score foi herdado da avaliação anterior.`
         );
@@ -576,8 +590,7 @@ export function mergeVisualDNASafe(
 
   let fullyCalibrated = false;
   if (baseCalibrated) {
-    // Both base scores and newly evaluated patch scores are V3 calibrated
-    fullyCalibrated = true;
+    fullyCalibrated = changedWithoutEvaluation.size === 0;
   } else {
     // Base was uncalibrated. Only fully calibrated if all retained scores were reevaluated
     if (canonicalInMerged.length > 0 && canonicalInMerged.every(k => scoresEvaluatedInPatch.has(k))) {
@@ -625,4 +638,28 @@ export function mergeVisualDNASafe(
     unappliedPartialBlocks,
     inheritanceWarnings
   };
+}
+
+/** Creation consumes normalized service metadata separately from sparse update intent. */
+export function createVisualDNAFromAnalysis(
+  identity: Pick<VisualDNA, 'id' | 'name' | 'imageUrl'> & Pick<Partial<VisualDNA>, 'createdAt' | 'updatedAt' | 'revision'>,
+  analysis: Partial<VisualDNA>,
+  patch?: VisualDNAPatch
+): VisualDNA {
+  const localIdentity = {
+    id: identity.id, name: identity.name, imageUrl: identity.imageUrl,
+    ...(identity.createdAt !== undefined ? { createdAt: identity.createdAt } : {}),
+    ...(identity.updatedAt !== undefined ? { updatedAt: identity.updatedAt } : {}),
+    ...(identity.revision !== undefined ? { revision: identity.revision } : {})
+  };
+  const created = mergeVisualDNASafe(localIdentity as VisualDNA, patch || createVisualDNAPatch(analysis)).data;
+  Object.assign(created, localIdentity);
+  // Only the service-owned normalized data can supply these markers; raw patch flags are ignored.
+  if (analysis.analysisVersion === 3) created.analysisVersion = 3;
+  if (['complete', 'partial', 'legacy'].includes(analysis.analysisStatus)) created.analysisStatus = analysis.analysisStatus;
+  created.warnings = Array.isArray(analysis.warnings)
+    ? [...new Set(analysis.warnings.filter(w => typeof w === 'string' && w.trim()).map(w => w.trim().replace(/\s+/g, ' ')))] : [];
+  created.isCalibrated = isCalibratedRecord(analysis) && isCalibratedRecord(created);
+  if (!created.isCalibrated) delete created.calibrationVersion;
+  return created;
 }

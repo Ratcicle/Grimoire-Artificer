@@ -103,6 +103,7 @@ export interface SynthesisDebug {
 export interface GeneratedCard {
   id: string;
   imageUrl: string;
+  visualDbStatus?: 'disabled' | 'empty' | 'no-selection' | 'filtered' | 'contributing';
   request: CardGenerationRequest;
   timestamp: number;
   injectedPromptBlock?: string;
@@ -118,10 +119,10 @@ export interface TokenUsageLog {
   timestamp: number;
   operationType: "analyze_image" | "reanalyze_image" | "analyze_all" | "generate_image";
   model: string;
-  promptTokenCount: number;
-  candidatesTokenCount: number;
-  thoughtsTokenCount: number;
-  totalTokenCount: number;
+  promptTokenCount?: number;
+  candidatesTokenCount?: number;
+  thoughtsTokenCount?: number;
+  totalTokenCount?: number;
   cachedContentTokenCount?: number;
   toolUsePromptTokenCount?: number;
   rawUsageMetadata?: any;
@@ -157,6 +158,9 @@ export interface VisualDNA {
   createdAt?: number;
   updatedAt?: number;
   revision?: number;
+  ownerId?: string | null;
+  imageFingerprint?: string;
+  cloudDocumentId?: string;
   
   // Advanced DNA Fields (Added for refinement)
   visualMotifs?: string;

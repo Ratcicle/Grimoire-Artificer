@@ -77,7 +77,7 @@ export function canonicalizeValue(value: unknown): CanonicalValue | undefined {
 }
 
 export function canonicalizeDnaContent(dna: VisualDNA): CanonicalValue {
-  const ignoreKeys = ['imageUrl', 'userId', 'createdAt', 'updatedAt', 'revision'];
+  const ignoreKeys = ['imageUrl', 'imageFingerprint', 'cloudDocumentId', 'ownerId', 'userId', 'createdAt', 'updatedAt', 'revision'];
   const contentOnly: Record<string, unknown> = {};
   for (const k of Object.keys(dna)) {
     if (!ignoreKeys.includes(k)) {
@@ -112,7 +112,7 @@ export function consolidateEquivalentRecords(local: VisualDNA, cloud: VisualDNA)
   
   // We use local as the base, because semantically they are equal.
   // To be safer, we can use the one with the higher revision or updatedAt.
-  const baseRecord = (local.revision ?? 1) >= (cloud.revision ?? 1) ? local : cloud;
+  const baseRecord = compareRecordVersions(local, cloud) >= 0 ? local : cloud;
   
   const canonical = { ...baseRecord, revision, createdAt, updatedAt };
   
@@ -146,7 +146,8 @@ export function compareRecordVersions(local: VisualDNA, cloud: VisualDNA): numbe
 export type ConflictResolution = "local_wins" | "cloud_wins" | "equivalent" | "legacy_conflict";
 
 export function resolveDnaConflict(local: VisualDNA, cloud: VisualDNA): ConflictResolution {
-  if (areDnaContentsEquivalent(local, cloud)) {
+  const sameImage = !local.imageFingerprint || !cloud.imageFingerprint || local.imageFingerprint === cloud.imageFingerprint;
+  if (areDnaContentsEquivalent(local, cloud) && sameImage) {
     return "equivalent";
   }
   
@@ -161,6 +162,19 @@ export function isBase64Image(value: string | undefined): boolean {
   return typeof value === 'string' && value.startsWith('data:image');
 }
 
+// Source identity is independent of full-size/thumbnail representation. This is
+// an equality hint, never a security check or content authenticity claim.
+export function fingerprintImage(value: string): string {
+  let first = 2166136261;
+  let second = 0x9e3779b9;
+  for (let index = 0; index < value.length; index++) {
+    const code = value.charCodeAt(index);
+    first = Math.imul(first ^ code, 16777619);
+    second = Math.imul(second ^ code, 2246822519);
+  }
+  return `${value.length}:${(first >>> 0).toString(16)}:${(second >>> 0).toString(16)}`;
+}
+
 export function sanitizeCloudImageUrl(candidate: string | undefined, existingCloudImage?: string): string | undefined {
   if (isBase64Image(candidate)) {
     return existingCloudImage && !isBase64Image(existingCloudImage) ? existingCloudImage : undefined;
@@ -170,6 +184,11 @@ export function sanitizeCloudImageUrl(candidate: string | undefined, existingClo
 
 export function preserveBestLocalImage(resolvedRecord: VisualDNA, localRecord?: VisualDNA, cloudRecord?: VisualDNA): VisualDNA {
   const record = { ...resolvedRecord };
+  // A different source image must not inherit the previous source's full-size pixels.
+  if (record.imageFingerprint) {
+    const localFingerprint = localRecord?.imageFingerprint ?? (localRecord?.imageUrl ? fingerprintImage(localRecord.imageUrl) : undefined);
+    if (localFingerprint && record.imageFingerprint !== localFingerprint) return record;
+  }
   
   if (isBase64Image(localRecord?.imageUrl)) {
     record.imageUrl = localRecord!.imageUrl;
@@ -196,7 +215,7 @@ export function upsertWrite(map: Map<string, VisualDNA>, record: VisualDNA): voi
 
 export interface SyncFailure {
   id?: string;
-  operation: "read" | "upload" | "delete" | "thumbnail" | "auth";
+  operation: "read" | "upload" | "delete" | "thumbnail" | "auth" | "conflict" | "local";
   message: string;
   retryable: boolean;
 }
@@ -238,13 +257,13 @@ export function createVisualDnaSyncPlan(
 
   const allIds = new Set([...localMap.keys(), ...cloudMap.keys()]);
   
-  const isCloudImageUpdateNeeded = (localUrl?: string, cloudUrl?: string) => {
-    if (localUrl === cloudUrl) return false;
-    if (typeof localUrl === 'string' && localUrl.startsWith('data:image') && 
-        typeof cloudUrl === 'string' && cloudUrl.startsWith('http')) {
-      return false;
-    }
-    return true;
+  const isCloudImageUpdateNeeded = (local: VisualDNA, cloud: VisualDNA) => {
+    if (local.imageFingerprint && cloud.imageFingerprint) return local.imageFingerprint !== cloud.imageFingerprint;
+    if (local.imageUrl === cloud.imageUrl) return false;
+    // Legacy records have no source fingerprint. Their common revision identifies
+    // the source; full-size pixels and the 180x180 thumbnail are different encodings.
+    if (isBase64Image(local.imageUrl) && cloud.imageUrl) return false;
+    return local.imageUrl !== cloud.imageUrl;
   };
 
   for (const id of allIds) {
@@ -292,7 +311,7 @@ export function createVisualDnaSyncPlan(
         if (localMigrated || JSON.stringify(resolvedLocal) !== JSON.stringify(rawLocalItem)) {
           upsertWrite(localWritesMap, resolvedLocal);
         }
-        if (cloudItem.revision !== localItem.revision || cloudItem.updatedAt !== localItem.updatedAt || !areDnaContentsEquivalent(cloudItem, localItem) || isCloudImageUpdateNeeded(localItem.imageUrl, rawCloudItem.imageUrl)) {
+        if (cloudItem.revision !== localItem.revision || cloudItem.updatedAt !== localItem.updatedAt || !areDnaContentsEquivalent(cloudItem, localItem) || isCloudImageUpdateNeeded(localItem, rawCloudItem)) {
           upsertWrite(cloudWritesMap, localItem);
         }
       } else if (resolution === "cloud_wins") {
@@ -310,7 +329,7 @@ export function createVisualDnaSyncPlan(
         if (localNeedsWrite || localMigrated || JSON.stringify(resolvedLocal) !== JSON.stringify(rawLocalItem)) {
           upsertWrite(localWritesMap, resolvedLocal);
         }
-        if (cloudNeedsWrite || cloudMigrated || isCloudImageUpdateNeeded(canonical.imageUrl, rawCloudItem.imageUrl)) {
+        if (cloudNeedsWrite || cloudMigrated || isCloudImageUpdateNeeded(canonical, rawCloudItem)) {
           upsertWrite(cloudWritesMap, canonical);
         }
       } else if (resolution === "legacy_conflict") {

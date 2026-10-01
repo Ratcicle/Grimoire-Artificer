@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
-import { BarChart3, RefreshCw, Trash2, Download, AlertCircle, CheckCircle, Clock } from 'lucide-react';
+import { RefreshCw, Trash2, Download, AlertCircle, CheckCircle } from 'lucide-react';
 import { TokenUsageLog } from '../types';
 import { getTokenLogs, clearTokenLogs } from '../services/localDbService';
+import { formatTokenCount, summarizeTokens } from '../services/tokenMetrics';
 
 export const TokenMonitor: React.FC = () => {
   const [logs, setLogs] = useState<TokenUsageLog[]>([]);
@@ -41,35 +42,21 @@ export const TokenMonitor: React.FC = () => {
     downloadAnchorNode.remove();
   };
 
-  const totalCalls = logs.length;
-  const successfulCalls = logs.filter(l => l.success);
-  
-  const totalInputTokens = logs.reduce((sum, log) => sum + (log.promptTokenCount || 0), 0);
-  const totalOutputTokens = logs.reduce((sum, log) => sum + (log.candidatesTokenCount || 0), 0);
-  const totalTokens = logs.reduce((sum, log) => sum + (log.totalTokenCount || 0), 0);
-  const totalThinkingTokens = logs.reduce((sum, log) => sum + (log.thoughtsTokenCount || 0), 0);
-  
-  const avgTokensPerCall = successfulCalls.length ? Math.round(totalTokens / successfulCalls.length) : 0;
-  const latestModel = logs[0]?.model || "N/A";
+  const totals = summarizeTokens(logs);
+  const inputTotals = summarizeTokens(logs, 'promptTokenCount');
+  const outputTotals = summarizeTokens(logs, 'candidatesTokenCount');
+  const coverage = (metric: ReturnType<typeof summarizeTokens>, noun = 'totals') =>
+    `${metric.knownCount} of ${metric.attemptCount} attempts reported ${noun}`;
 
-  // Group by operation
-  const opsSummary = logs.reduce((acc, log) => {
-    if (!acc[log.operationType]) acc[log.operationType] = { count: 0, tokens: 0 };
-    acc[log.operationType].count += 1;
-    acc[log.operationType].tokens += (log.totalTokenCount || 0);
-    return acc;
-  }, {} as Record<string, { count: number, tokens: number }>);
-
-  // Group by model
-  const modelSummary = logs.reduce((acc, log) => {
-    if (!acc[log.model]) acc[log.model] = { count: 0, input: 0, output: 0, thinking: 0, total: 0 };
-    acc[log.model].count += 1;
-    acc[log.model].input += (log.promptTokenCount || 0);
-    acc[log.model].output += (log.candidatesTokenCount || 0);
-    acc[log.model].thinking += (log.thoughtsTokenCount || 0);
-    acc[log.model].total += (log.totalTokenCount || 0);
-    return acc;
-  }, {} as Record<string, { count: number, input: number, output: number, thinking: number, total: number }>);
+  const opsSummary = Object.fromEntries([...new Set(logs.map(log => log.operationType))].map(operation => {
+    const entries = logs.filter(log => log.operationType === operation);
+    return [operation, summarizeTokens(entries)];
+  }));
+  const modelSummary = Object.fromEntries([...new Set(logs.map(log => log.model))].map(model => {
+    const entries = logs.filter(log => log.model === model);
+    return [model, { count: entries.length, input: summarizeTokens(entries, 'promptTokenCount'),
+      output: summarizeTokens(entries, 'candidatesTokenCount'), total: summarizeTokens(entries) }];
+  }));
 
   // Identify sessions (Analyze All)
   const sessionIds = Array.from(new Set(logs.filter(l => l.sessionId).map(l => l.sessionId as string)));
@@ -81,8 +68,7 @@ export const TokenMonitor: React.FC = () => {
       timestamp: Math.min(...sessionLogs.map(l => l.timestamp)),
       totalCalls: sessionLogs.length,
       successCount,
-      totalTokens: sessionLogs.reduce((sum, log) => sum + (log.totalTokenCount || 0), 0),
-      avgTokens: successCount > 0 ? Math.round(sessionLogs.reduce((sum, log) => sum + (log.totalTokenCount || 0), 0) / successCount) : 0
+      totals: summarizeTokens(sessionLogs)
     };
   }).sort((a, b) => b.timestamp - a.timestamp);
 
@@ -119,19 +105,23 @@ export const TokenMonitor: React.FC = () => {
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
         <div className="p-4 rounded-xl border border-stone-800 bg-stone-900/50">
           <p className="text-[10px] uppercase tracking-widest text-stone-500 mb-1">Total Tokens</p>
-          <p className="text-2xl font-mono text-white">{totalTokens.toLocaleString()}</p>
+          <p className="text-2xl font-mono text-white">{formatTokenCount(totals.sum)}</p>
+          <p className="text-[10px] text-stone-500">{coverage(totals)}</p>
         </div>
         <div className="p-4 rounded-xl border border-stone-800 bg-stone-900/50">
           <p className="text-[10px] uppercase tracking-widest text-stone-500 mb-1">Total Input Tokens</p>
-          <p className="text-2xl font-mono text-blue-400">{totalInputTokens.toLocaleString()}</p>
+          <p className="text-2xl font-mono text-blue-400">{formatTokenCount(inputTotals.sum)}</p>
+          <p className="text-[10px] text-stone-500">{coverage(inputTotals, 'input counts')}</p>
         </div>
         <div className="p-4 rounded-xl border border-stone-800 bg-stone-900/50">
           <p className="text-[10px] uppercase tracking-widest text-stone-500 mb-1">Total Output Tokens</p>
-          <p className="text-2xl font-mono text-green-400">{totalOutputTokens.toLocaleString()}</p>
+          <p className="text-2xl font-mono text-green-400">{formatTokenCount(outputTotals.sum)}</p>
+          <p className="text-[10px] text-stone-500">{coverage(outputTotals, 'output counts')}</p>
         </div>
         <div className="p-4 rounded-xl border border-stone-800 bg-stone-900/50">
           <p className="text-[10px] uppercase tracking-widest text-stone-500 mb-1">Avg Tokens / Call</p>
-          <p className="text-2xl font-mono text-amber-500">{avgTokensPerCall.toLocaleString()}</p>
+          <p className="text-2xl font-mono text-amber-500">{formatTokenCount(totals.average)}</p>
+          <p className="text-[10px] text-stone-500">{coverage(totals)}</p>
         </div>
       </div>
 
@@ -155,9 +145,9 @@ export const TokenMonitor: React.FC = () => {
                   <tr key={model} className="hover:bg-stone-900/30">
                     <td className="py-2 text-stone-300">{model}</td>
                     <td className="py-2 text-stone-400">{stats.count}</td>
-                    <td className="py-2 text-blue-400/80">{stats.input.toLocaleString()}</td>
-                    <td className="py-2 text-green-400/80">{stats.output.toLocaleString()}</td>
-                    <td className="py-2 text-amber-500/80">{stats.total.toLocaleString()}</td>
+                    <td className="py-2 text-blue-400/80" title={coverage(stats.input, 'input counts')}>{formatTokenCount(stats.input.sum)}</td>
+                    <td className="py-2 text-green-400/80" title={coverage(stats.output, 'output counts')}>{formatTokenCount(stats.output.sum)}</td>
+                    <td className="py-2 text-amber-500/80" title={coverage(stats.total)}>{formatTokenCount(stats.total.sum)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -181,8 +171,8 @@ export const TokenMonitor: React.FC = () => {
                 {Object.entries(opsSummary).map(([op, stats]: [string, any]) => (
                   <tr key={op} className="hover:bg-stone-900/30">
                     <td className="py-2 text-stone-300">{op}</td>
-                    <td className="py-2 text-stone-400">{stats.count}</td>
-                    <td className="py-2 text-amber-500/80">{stats.tokens.toLocaleString()}</td>
+                    <td className="py-2 text-stone-400">{stats.attemptCount}</td>
+                    <td className="py-2 text-amber-500/80" title={coverage(stats)}>{formatTokenCount(stats.sum)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -199,8 +189,9 @@ export const TokenMonitor: React.FC = () => {
               <div key={session.id} className="p-3 bg-stone-900/50 rounded border border-stone-800/50 flex flex-col gap-1">
                 <span className="text-[9px] text-stone-500 uppercase">{new Date(session.timestamp).toLocaleString()}</span>
                 <span className="text-xs text-stone-300"><b>{session.successCount}/{session.totalCalls}</b> Successful</span>
-                <span className="text-xs font-mono text-amber-500">{session.totalTokens.toLocaleString()} Tokens Total</span>
-                <span className="text-[10px] text-stone-400">~{session.avgTokens.toLocaleString()} avg / image</span>
+                <span className="text-xs font-mono text-amber-500">{formatTokenCount(session.totals.sum)} Tokens Total</span>
+                <span className="text-[10px] text-stone-400">~{formatTokenCount(session.totals.average)} avg / attempt</span>
+                <span className="text-[10px] text-stone-500">{coverage(session.totals)}</span>
               </div>
             ))}
           </div>
@@ -223,22 +214,16 @@ export const TokenMonitor: React.FC = () => {
                   <th className="p-3 font-normal">Model</th>
                   <th className="p-3 font-normal">Input</th>
                   <th className="p-3 font-normal">Output</th>
-                  <th className="p-3 font-normal">Cached</th>
+                  <th className="p-3 font-normal" title="Cached tokens are included in Input.">Cached</th>
                   <th className="p-3 font-normal">Tools</th>
                   <th className="p-3 font-normal">Thoughts</th>
-                  <th className="p-3 font-normal">Unaccounted</th>
+                  <th className="p-3 font-normal">Raw Metadata</th>
                   <th className="p-3 font-normal">Total</th>
                   <th className="p-3 font-normal text-center">Status</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-stone-800/50 bg-stone-950/50">
                 {logs.map((log) => {
-                  const accountedTokens = (log.promptTokenCount || 0) + 
-                                          (log.candidatesTokenCount || 0) + 
-                                          (log.cachedContentTokenCount || 0) + 
-                                          (log.toolUsePromptTokenCount || 0) + 
-                                          (log.thoughtsTokenCount || 0);
-                  const unaccounted = (log.totalTokenCount || 0) - accountedTokens;
                   return (
                   <tr key={log.id} className="hover:bg-stone-900/50 transition-colors">
                     <td className="p-3 text-stone-400">{new Date(log.timestamp).toLocaleString()}</td>
@@ -247,15 +232,15 @@ export const TokenMonitor: React.FC = () => {
                       {log.sessionId && <span className="ml-1 text-[9px] text-stone-600">(Batch)</span>}
                     </td>
                     <td className="p-3 text-stone-400">{log.model}</td>
-                    <td className="p-3 text-blue-400/70">{log.promptTokenCount > 0 ? log.promptTokenCount : '-'}</td>
-                    <td className="p-3 text-green-400/70">{log.candidatesTokenCount > 0 ? log.candidatesTokenCount : '-'}</td>
-                    <td className="p-3 text-emerald-400/70">{log.cachedContentTokenCount ? log.cachedContentTokenCount : '-'}</td>
-                    <td className="p-3 text-purple-400/70">{log.toolUsePromptTokenCount ? log.toolUsePromptTokenCount : '-'}</td>
-                    <td className="p-3 text-pink-400/70">{log.thoughtsTokenCount > 0 ? log.thoughtsTokenCount : '-'}</td>
-                    <td className="p-3 text-stone-500/70" title={log.rawUsageMetadata ? JSON.stringify(log.rawUsageMetadata, null, 2) : "Hover to see raw data"}>
-                      {unaccounted > 0 ? unaccounted : '-'}
+                    <td className="p-3 text-blue-400/70">{formatTokenCount(log.promptTokenCount)}</td>
+                    <td className="p-3 text-green-400/70">{formatTokenCount(log.candidatesTokenCount)}</td>
+                    <td className="p-3 text-emerald-400/70">{formatTokenCount(log.cachedContentTokenCount)}</td>
+                    <td className="p-3 text-purple-400/70">{formatTokenCount(log.toolUsePromptTokenCount)}</td>
+                    <td className="p-3 text-pink-400/70">{formatTokenCount(log.thoughtsTokenCount)}</td>
+                    <td className="p-3 text-stone-500/70" title={log.rawUsageMetadata ? JSON.stringify(log.rawUsageMetadata, null, 2) : "Usage metadata unavailable"}>
+                      {log.rawUsageMetadata ? 'Details' : '-'}
                     </td>
-                    <td className="p-3 text-amber-500/70">{log.totalTokenCount > 0 ? log.totalTokenCount : '-'}</td>
+                    <td className="p-3 text-amber-500/70">{formatTokenCount(log.totalTokenCount)}</td>
                     <td className="p-3 text-center">
                       {log.success ? (
                         <CheckCircle size={14} className="text-green-500 mx-auto" />
