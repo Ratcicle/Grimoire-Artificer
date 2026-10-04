@@ -77,6 +77,16 @@ const same = (a: unknown, b: unknown) => JSON.stringify(canonicalizeValue(a)) ==
 const nonempty = (value: unknown): value is string => typeof value === 'string' && value.trim().length > 0;
 const fail = (message: string): never => { throw new Error(message); };
 
+function describeRecord(record: unknown): string {
+  const label = (key: string) => isObject(record) && typeof record[key] === 'string' ? JSON.stringify(record[key]) : '(ausente ou inválido)';
+  return `Referência id=${label('id')}, nome=${label('name')}`;
+}
+
+function withRecordContext<T>(record: unknown, operation: () => T): T {
+  try { return operation(); }
+  catch (error) { return fail(`${describeRecord(record)}: ${error instanceof Error ? error.message : String(error)}`); }
+}
+
 function projectValue(value: unknown, rule: Rule, path: string, strict: boolean): any {
   if (typeof rule === 'string') {
     if (rule === 'owner' ? value === null || nonempty(value) : typeof value === rule && (rule !== 'number' || Number.isFinite(value))) return value;
@@ -134,12 +144,30 @@ function validateRecord(record: Record<string, any>, ownerId: string | null, war
     if (!nonempty(subject.id) || subjectIds.has(subject.id)) fail('Sujeito com id vazio ou duplicado.');
     subjectIds.add(subject.id);
   }
-  for (const relation of record.scaleRelationships || []) {
-    if (!nonempty(relation.relationship) || !subjectIds.has(relation.subjectA) || !subjectIds.has(relation.subjectB) || relation.subjectA === relation.subjectB) fail('Relação de escala inválida: sujeitos ausentes ou incompatíveis.');
+  for (const [index, relation] of (record.scaleRelationships || []).entries()) {
+    for (const key of ['subjectA', 'subjectB', 'relationship']) {
+      if (typeof relation[key] !== 'string') fail(`Campo obrigatório ausente ou inválido em scaleRelationships[${index}].${key}.`);
+    }
   }
-  if (Object.values(record.scores || {}).some(score => (score as number) < 0 || (score as number) > 1)) warnings.add('Notas legadas fora de 0–1 foram preservadas sem conversão nem recalibração.');
-  if (!record.analysisVersion || record.analysisVersion < 3 || !record.isCalibrated || record.calibrationVersion !== 3) warnings.add('Há registros legados ou sem calibração V3 comprovada; a restauração preserva essa procedência.');
+  collectAnalyticalWarnings(record as VisualDNA, warnings);
   return record as VisualDNA;
+}
+
+// Archiving existing analysis does not certify its consistency. Keep recognizable
+// legacy relationships verbatim; structural/type/scope checks remain mandatory.
+function collectAnalyticalWarnings(record: VisualDNA, warnings: Set<string>): void {
+  const label = describeRecord(record);
+  const subjectIds = new Set((record.subjects || []).map(subject => subject.id));
+  for (const [index, relation] of (record.scaleRelationships || []).entries()) {
+    const issues: string[] = [];
+    if (!subjectIds.has(relation.subjectA)) issues.push(`subjectA ${JSON.stringify(relation.subjectA)} ausente em subjects`);
+    if (!subjectIds.has(relation.subjectB)) issues.push(`subjectB ${JSON.stringify(relation.subjectB)} ausente em subjects`);
+    if (relation.subjectA === relation.subjectB) issues.push('autorrelação: subjectA e subjectB são iguais');
+    if (!nonempty(relation.relationship)) issues.push('relationship contém descrição vazia');
+    if (issues.length) warnings.add(`${label}: scaleRelationships[${index}]: ${issues.join('; ')}. Conteúdo preservado sem correção; consistência analítica não certificada.`);
+  }
+  if (Object.values(record.scores || {}).some(score => score < 0 || score > 1)) warnings.add(`${label}: notas legadas fora de 0–1 foram preservadas sem conversão nem recalibração.`);
+  if (!record.analysisVersion || record.analysisVersion < 3 || !record.isCalibrated || record.calibrationVersion !== 3) warnings.add(`${label}: registro legado ou sem calibração V3 comprovada; a restauração preserva essa procedência.`);
 }
 
 // Bytes alone cannot prove provenance, regardless of base64 length.
@@ -151,11 +179,11 @@ export async function exportLibraryBackup(ownerId: string | null = captureDnaOpe
   const snapshot = await readDnaBackupSnapshot(ownerId);
   assertDnaOperationContext(context);
   const warnings = new Set<string>(['As imagens disponíveis localmente foram preservadas sem recompressão. A procedência como imagem original não está comprovada.']);
-  const records = snapshot.records.map(record => {
+  const records = snapshot.records.map(record => withRecordContext(record, () => {
     const projected = projectObject(record, RECORD_SCHEMA, 'record', false);
     validateRecord(projected, ownerId, warnings);
     return { ...projected, imageType: classifyImageType(record.imageUrl) } as GrimoireBackupRecord;
-  });
+  }));
   const tombstones = snapshot.tombstones.map(t => projectObject(t, TOMBSTONE_SCHEMA, 'tombstone', false) as GrimoireBackupTombstone);
   const calibratedCount = records.filter(r => r.isCalibrated === true && r.calibrationVersion === 3 && Object.values(r.scores || {}).every(score => typeof score === 'number' && score >= 0 && score <= 1)).length;
   return {
@@ -189,11 +217,11 @@ function readBackup(text: string) {
   if (parsed.version === 1) warnings.add('Backup V1 incompleto: campos ausentes serão preservados nas substituições; informações nunca exportadas não podem ser recuperadas.');
   const ids = new Set<string>();
   for (const record of parsed.records) {
-    if (!isObject(record) || !nonempty(record.id)) fail('Registro com id vazio ou inválido.');
-    if (ids.has(record.id)) fail(`ID duplicado no backup: ${record.id}.`);
+    if (!isObject(record) || !nonempty(record.id)) fail(`${describeRecord(record)}: registro com id vazio ou inválido.`);
+    if (ids.has(record.id)) fail(`${describeRecord(record)}: ID duplicado no backup.`);
     ids.add(record.id);
   }
-  const records = parsed.records.map((raw: any) => {
+  const records = parsed.records.map((raw: any) => withRecordContext(raw, () => {
     const { imageType, profile, ...data } = raw;
     if (imageType !== undefined && !['full', 'thumbnail', 'unknown'].includes(imageType)) fail('Tipo de procedência da imagem inválido.');
     if (profile !== undefined) {
@@ -202,7 +230,7 @@ function readBackup(text: string) {
     }
     warnings.add(imageType === 'thumbnail' ? 'O arquivo contém miniaturas recuperáveis; elas não recuperam as imagens originais.' : 'As imagens serão preservadas como disponíveis no arquivo; a procedência original não está comprovada.');
     return validateRecord(projectObject(data, RECORD_SCHEMA, 'record', true), scope.ownerId, warnings);
-  }) as VisualDNA[];
+  })) as VisualDNA[];
   const deletionIds = new Set<string>();
   const tombstones = (parsed.tombstones || []).map((raw: unknown) => {
     const t = projectObject(raw, TOMBSTONE_SCHEMA, 'tombstone', true);
@@ -284,7 +312,7 @@ export async function validateAndPreviewBackup(jsonText: string, targetOwnerId: 
     const incoming = new Map<string, VisualDNA>();
     const categories: PreparedPreview['categories'] = new Map();
     const preview: BackupPreviewResult = { ...empty, valid: true, warnings: data.warnings, previewToken: {}, fileScope: { ownerId: data.scope.ownerId, isLegacy: data.scope.isLegacy, description: data.scope.description || 'Biblioteca', exportedAt: data.exportedAt } };
-    for (const record of data.records) {
+    data.records.forEach(record => withRecordContext(record, () => {
       const current = records.get(record.id);
       const deleted = tombstones.get(record.id);
       if (current && deleted) fail('Estado local inconsistente: referência ativa e exclusão com o mesmo ID.');
@@ -301,7 +329,7 @@ export async function validateAndPreviewBackup(jsonText: string, targetOwnerId: 
         replacement.isCalibrated = false;
         preview.warnings!.push('O backup V1 não comprova a calibração do conteúdo combinado. As notas serão preservadas e a calibração herdada não será aplicada.');
       }
-      // Inherited relations must still refer to the subjects in the final plan.
+      // Recheck the merged structure and report inherited analytical inconsistencies.
       const mergedWarnings = new Set(preview.warnings);
       validateRecord(replacement, targetOwnerId, mergedWarnings);
       preview.warnings = [...mergedWarnings];
@@ -315,7 +343,7 @@ export async function validateAndPreviewBackup(jsonText: string, targetOwnerId: 
       } else {
         categories.set(record.id, 'conflict'); preview.conflicts.push({ id: record.id, name: record.name, current: structuredClone(current), incoming: structuredClone(replacement), resolution: 'keep_current' });
       }
-    }
+    }));
     const deletionChanges: DnaTombstone[] = [];
     for (const tombstone of data.tombstones) {
       if (records.has(tombstone.id)) fail(`A exclusão importada de "${tombstone.id}" atinge uma referência ativa. Os controles atuais não autorizam essa exclusão; nenhum item será restaurado.`);
