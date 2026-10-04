@@ -1,5 +1,5 @@
 import { VisualDNA, TokenUsageLog } from '../types';
-import { assertDnaOperationContext, captureDnaOperationContext, notifyDnaChanges } from './dnaAccountContext';
+import { assertDnaOperationContext, captureDnaOperationContext, notifyDnaChanges, subscribeDnaChanges, isDnaOperationContextCurrent } from './dnaAccountContext';
 import { canonicalizeValue } from './visualDnaSyncUtils';
 
 const DB_NAME = 'GrimoireArtificerDB';
@@ -210,6 +210,110 @@ export const getDnaTombstones = async (ownerId: string | null = captureDnaOperat
   const db = await initDB();
   const stored = await readRequest(db.transaction(TOMBSTONES_STORE, 'readonly').objectStore(TOMBSTONES_STORE).getAll());
   return stored.filter(item => item.ownerId === ownerId);
+};
+
+/** One local snapshot: export/preview cannot mix records and deletion intentions from different moments. */
+export const readDnaBackupSnapshot = async (ownerId: string | null): Promise<{ records: VisualDNA[]; tombstones: DnaTombstone[] }> => {
+  const db = await initDB();
+  const transaction = db.transaction([storeName(ownerId), TOMBSTONES_STORE], 'readonly');
+  const completed = transactionCompletion(transaction);
+  const recordRequest = readRequest(transaction.objectStore(storeName(ownerId)).getAll());
+  const tombstoneRequest = readRequest(transaction.objectStore(TOMBSTONES_STORE).getAll());
+  const [stored, deleted] = await Promise.all([recordRequest, tombstoneRequest, completed]);
+  return {
+    records: ownerId === null ? stored.filter(item => item.ownerId == null) : stored.filter(item => item.ownerId === ownerId).map(item => item.record),
+    tombstones: deleted.filter(item => item.ownerId === ownerId),
+  };
+};
+
+export interface DnaBackupMutation {
+  id: string;
+  expectedRecord: VisualDNA | null;
+  expectedTombstone: DnaTombstone | null;
+  record?: VisualDNA;
+  tombstone?: DnaTombstone;
+}
+
+/** Backup-specific atomic application. No cloud calls, image work, or per-record notifications. */
+export const applyLocalDnaBackup = async (ownerId: string | null, plan: DnaBackupMutation[]): Promise<void> => {
+  // Capture the entire in-memory plan before any await. The caller cannot change it mid-transaction.
+  const changes = structuredClone(plan);
+  const ids = new Set<string>();
+  for (const change of changes) {
+    if (ids.has(change.id) || (!!change.record === !!change.tombstone)) throw new Error('Invalid backup mutation plan.');
+    ids.add(change.id);
+    for (const value of [change.record, change.tombstone]) {
+      if (value && (value.id !== change.id || value.ownerId !== ownerId)) throw new Error('Backup mutation belongs to another scope.');
+    }
+    if (change.tombstone && (change.expectedRecord || change.tombstone.storageKey !== scopeKey(ownerId, change.id))) {
+      throw new Error('Imported deletion cannot remove an active reference.');
+    }
+  }
+  assertDnaOperationContext({ ownerId });
+  if (changes.length === 0) return;
+  let scopeChanged = false;
+  let abortForScopeChange: (() => void) | undefined;
+  const assertScope = () => {
+    if (scopeChanged) throw new Error('A conta mudou durante a restauração. Prepare uma nova prévia.');
+    assertDnaOperationContext({ ownerId });
+  };
+  const unsubscribe = subscribeDnaChanges(() => {
+    if (!isDnaOperationContextCurrent({ ownerId })) {
+      scopeChanged = true;
+      abortForScopeChange?.();
+    }
+  });
+  try {
+    const db = await initDB();
+    assertScope();
+    await new Promise<void>((resolve, reject) => {
+      const transaction = db.transaction([storeName(ownerId), TOMBSTONES_STORE], 'readwrite');
+      const records = transaction.objectStore(storeName(ownerId));
+      const tombstones = transaction.objectStore(TOMBSTONES_STORE);
+      let failure: unknown;
+      const abort = (error: unknown) => {
+        failure ||= error;
+        try { transaction.abort(); } catch { /* Already aborted or committed. */ }
+      };
+      abortForScopeChange = () => abort(new Error('A conta mudou durante a restauração. Prepare uma nova prévia.'));
+      transaction.oncomplete = () => resolve();
+      // A request success is not a commit. Reject only once the transaction has rolled back.
+      transaction.onabort = () => reject(failure || transaction.error || new Error('Backup transaction aborted.'));
+      transaction.onerror = () => { failure ||= transaction.error || new Error('Backup transaction failed.'); };
+      const snapshots = changes.map(() => ({ record: null as VisualDNA | null, tombstone: null as DnaTombstone | null }));
+      let pending = changes.length * 2;
+      const ready = () => {
+        try {
+          assertScope();
+          if (--pending !== 0) return;
+          changes.forEach((change, index) => {
+            const snapshot = snapshots[index];
+            if (!areLocalDnaSnapshotsEqual(snapshot.record, change.expectedRecord) ||
+                JSON.stringify(canonicalizeValue(snapshot.tombstone)) !== JSON.stringify(canonicalizeValue(change.expectedTombstone))) {
+              throw new Error(`A referência ou exclusão "${change.id}" mudou após a prévia. Prepare uma nova prévia.`);
+            }
+          });
+          for (const change of changes) {
+            const request = change.record
+              ? records.put(ownerId === null ? change.record : { storageKey: scopeKey(ownerId, change.id), ownerId, record: change.record })
+              : tombstones.put(change.tombstone);
+            const checkScope = () => {
+              try { assertScope(); } catch (error) { abort(error); }
+            };
+            request.onsuccess = checkScope;
+            if (change.record && change.expectedTombstone) tombstones.delete(scopeKey(ownerId, change.id)).onsuccess = checkScope;
+          }
+        } catch (error) { abort(error); }
+      };
+      changes.forEach((change, index) => {
+        const current = records.get(recordKey(ownerId, change.id));
+        current.onsuccess = () => { snapshots[index].record = unwrap(current.result, ownerId) ?? null; ready(); };
+        const deleted = tombstones.get(scopeKey(ownerId, change.id));
+        deleted.onsuccess = () => { snapshots[index].tombstone = deleted.result ?? null; ready(); };
+      });
+    });
+  } finally { unsubscribe(); }
+  notifyDnaChanges();
 };
 
 export const acknowledgeDnaDeletion = async (tombstone: DnaTombstone): Promise<void> => {

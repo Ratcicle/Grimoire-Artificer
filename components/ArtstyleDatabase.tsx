@@ -92,6 +92,8 @@ const ArtstyleDatabase: React.FC<ArtstyleDatabaseProps> = ({ onBackToGrimoire })
   const [restoreError, setRestoreError] = useState<string | null>(null);
   const [applyingRestore, setApplyingRestore] = useState<boolean>(false);
   const restoreFileInputRef = useRef<HTMLInputElement>(null);
+  const restoreInFlight = useRef(false);
+  const restoreFileVersion = useRef(0);
 
   const preparingFiles = useRef(false);
   const [preparing, setPreparing] = useState(false);
@@ -238,7 +240,7 @@ const ArtstyleDatabase: React.FC<ArtstyleDatabaseProps> = ({ onBackToGrimoire })
       downloadAnchor.click();
       document.body.removeChild(downloadAnchor);
       URL.revokeObjectURL(url);
-      setSyncStatusMsg(`Backup exportado: ${backup.records.length} referências salvas.`);
+      setSyncStatusMsg(`Backup exportado: ${backup.records.length} referências salvas. ${backup.warnings.join(' ')}`);
     } catch (err: any) {
       setSyncStatusMsg(`Falha ao exportar backup: ${err.message}`);
     }
@@ -246,18 +248,27 @@ const ArtstyleDatabase: React.FC<ArtstyleDatabaseProps> = ({ onBackToGrimoire })
 
   const handleSelectRestoreFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (!file) return;
+    if (!file || restoreInFlight.current) return;
+    const context = captureDnaOperationContext();
+    const selection = selectionContext.current;
+    const version = ++restoreFileVersion.current;
     setRestoreError(null);
+    setRestorePreview(null);
+    setShowRestoreModal(false);
     try {
       const text = await file.text();
-      const currentTargetOwner = user ? user.uid : null;
-      const preview = await validateAndPreviewBackup(text, currentTargetOwner);
+      if (version !== restoreFileVersion.current) return;
+      if (!isDnaOperationContextCurrent(context) || selection !== selectionContext.current) throw new Error('A conta mudou durante a leitura do backup. Selecione o arquivo novamente.');
+      const preview = await validateAndPreviewBackup(text, context.ownerId);
+      if (version !== restoreFileVersion.current) return;
+      if (!isDnaOperationContextCurrent(context) || selection !== selectionContext.current) throw new Error('A conta mudou durante a preparação da prévia. Selecione o arquivo novamente.');
       if (!preview.valid) {
         setRestoreError(preview.error || 'Arquivo de backup inválido.');
         setSyncStatusMsg(`Erro no backup: ${preview.error}`);
         return;
       }
       setRestorePreview(preview);
+      setRestoreError(preview.warnings?.join(' ') || null);
       setShowRestoreModal(true);
     } catch (err: any) {
       setRestoreError(err.message || 'Falha ao processar arquivo de backup.');
@@ -288,36 +299,26 @@ const ArtstyleDatabase: React.FC<ArtstyleDatabaseProps> = ({ onBackToGrimoire })
   };
 
   const handleApplyRestore = async () => {
-    if (!restorePreview) return;
+    if (!restorePreview || restoreInFlight.current) return;
+    restoreInFlight.current = true;
+    const selection = selectionContext.current;
     setApplyingRestore(true);
     try {
-      const targetOwnerId = user ? user.uid : null;
-      const conflictsToReplace = restorePreview.conflicts
-        .filter(c => c.resolution === 'replace')
-        .map(c => ({ current: c.current, replacement: c.incoming }));
-      const deletedToRestore = restorePreview.deletedConflicts
-        .filter(d => d.resolution === 'restore')
-        .map(d => d.incoming);
-
-      const result = await applyBackupRestoration({
-        targetOwnerId,
-        newRecords: restorePreview.newRecords,
-        conflictsToReplace,
-        deletedToRestore
-      });
+      const result = await applyBackupRestoration(restorePreview);
 
       if (!result.success) {
         throw new Error(result.error || 'Falha ao aplicar restauração.');
       }
 
-      const refreshed = await getLocalDNA(targetOwnerId);
-      setDnaList(refreshed);
+      if (selection !== selectionContext.current) return;
+      // The committed transaction emits one library-change notification.
       setShowRestoreModal(false);
       setRestorePreview(null);
-      setSyncStatusMsg(`Restauração concluída! ${result.appliedCount} registros atualizados (${result.addedCount} novos, ${result.replacedCount} substituídos, ${result.restoredCount} ressuscitados).`);
+      setSyncStatusMsg(`Restauração concluída! ${result.appliedCount} registros atualizados (${result.addedCount} novos, ${result.replacedCount} substituídos, ${result.restoredCount} ressuscitados). ${result.tombstoneCount || 0} intenções de exclusão preservadas localmente.`);
     } catch (err: any) {
       setRestoreError(err.message || 'Erro durante a restauração.');
     } finally {
+      restoreInFlight.current = false;
       setApplyingRestore(false);
     }
   };
@@ -482,7 +483,7 @@ const ArtstyleDatabase: React.FC<ArtstyleDatabaseProps> = ({ onBackToGrimoire })
   const filteredList = dnaList.filter(item => {
     const matchesSearch = 
       item.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      item.summary.toLowerCase().includes(searchQuery.toLowerCase());
+      (item.summary || '').toLowerCase().includes(searchQuery.toLowerCase());
     
     const matchesTag = selectedTag ? (item.tags || []).includes(selectedTag) : true;
     

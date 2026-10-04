@@ -1,610 +1,366 @@
 import { VisualDNA } from '../types';
-import { getLocalDNA, getDnaTombstones, saveLocalDNA, areLocalDnaSnapshotsEqual, type DnaTombstone } from './localDbService';
-import { assertDnaOperationContext, captureDnaOperationContext, notifyDnaChanges } from './dnaAccountContext';
+import { readDnaBackupSnapshot, applyLocalDnaBackup, type DnaBackupMutation, type DnaTombstone } from './localDbService';
+import { assertDnaOperationContext, captureDnaOperationContext, isDnaOperationContextCurrent, subscribeDnaChanges, type DnaOperationContext } from './dnaAccountContext';
 import { canonicalizeValue } from './visualDnaSyncUtils';
 
 export const GRIMOIRE_BACKUP_FORMAT = 'grimoire-artstyle-backup';
-export const GRIMOIRE_BACKUP_VERSION = 1;
+export const GRIMOIRE_BACKUP_VERSION = 2;
 
-export interface GrimoireBackupRecord {
-  id: string;
-  name: string;
-  imageUrl: string;
-  imageType: 'full' | 'thumbnail';
-  summary?: string;
-  linework?: string;
-  rendering?: string;
-  palette?: string;
-  silhouette?: string;
-  pose?: string;
-  framing?: string;
-  composition?: string;
-  lighting?: string;
-  effects?: string;
-  materials?: string;
-  details?: string;
-  background?: string;
-  hierarchy?: string;
-  positivePrompt?: string;
-  negativePrompt?: string;
-  tags?: string[];
-  scores?: Record<string, number>;
-  profile?: any;
-  subjectProfile?: any;
-  scoreJustifications?: any;
-  isCalibrated?: boolean;
-  calibrationVersion?: number;
-  analysisStatus?: string;
-  createdAt?: number;
-  updatedAt?: number;
-  revision?: number;
-  imageFingerprint?: string;
-}
+type Rule = 'string' | 'number' | 'boolean' | 'owner' | { array: Rule } | { dictionary: Rule } | { shape: Record<string, Rule> } | { values: readonly string[] } | { either: Rule[] };
+const strings: Rule = { array: 'string' };
+const subjectShape: Rule = { shape: {
+  id: 'string', description: 'string', category: 'string', visualRole: { values: ['primary', 'secondary', 'supporting'] },
+  physicalScale: 'string', perceivedPresence: 'string', materials: strings, surfaces: strings, elements: strings,
+} };
+const scoresShape = {
+  style: 'number', palette: 'number', pose: 'number', composition: 'number', lighting: 'number', effects: 'number',
+  materials: 'number', background: 'number', details: 'number', silhouette: 'number', rendering: 'number', detailDensity: 'number',
+} as const;
 
-export interface GrimoireBackupTombstone {
-  id: string;
-  deletedAt: number;
-}
+// Shared by export, validation, comparison and restore. usageMetadata is
+// consumption/provider data, not analytical DNA. Raw responses and arbitrary
+// extensions never enter this explicit contract.
+const RECORD_SCHEMA = {
+  id: 'string', name: 'string', imageUrl: 'string', ownerId: 'owner',
+  summary: 'string', linework: 'string', rendering: 'string', palette: 'string', silhouette: 'string', pose: 'string',
+  framing: 'string', composition: 'string', lighting: 'string', effects: 'string', materials: 'string', details: 'string',
+  background: 'string', hierarchy: 'string', positivePrompt: 'string', negativePrompt: { either: ['string', strings] },
+  visualMotifs: 'string', shapeLanguage: 'string', focalAnchors: 'string', detailPlacement: 'string', compositionRecipe: 'string',
+  paletteLogic: 'string', materialBehavior: 'string', energyDesign: 'string', styleAnchors: 'string', avoidRules: { either: ['string', strings] },
+  stylePromptFragments: strings, contentMotifs: strings, identitySpecificDetails: strings,
+  universalQualityAvoids: strings, styleSpecificAvoids: strings, contentSpecificAvoids: strings,
+  subjectProfile: { shape: { primarySubject: 'string', subjectCategory: 'string', visualRole: 'string' } },
+  scaleProfile: { shape: { physicalScale: 'string', scaleForms: strings, scaleCues: strings, perceivedPresence: 'string', evidence: 'string', confidence: 'number' } },
+  substanceProfile: { shape: { materials: strings, surfaces: strings, elements: strings, elementApplications: strings, evidence: 'string', confidence: 'number' } },
+  subjects: { array: subjectShape },
+  scaleRelationships: { array: { shape: { subjectA: 'string', subjectB: 'string', relationship: 'string', evidence: 'string' } } },
+  tags: strings, scores: { shape: scoresShape },
+  scoreJustifications: { dictionary: 'string' },
+  analysisVersion: 'number', analysisStatus: { values: ['complete', 'partial', 'legacy'] }, warnings: strings,
+  isCalibrated: 'boolean', calibrationVersion: 'number', createdAt: 'number', updatedAt: 'number', revision: 'number',
+  imageFingerprint: 'string', cloudDocumentId: 'string',
+} satisfies Record<Exclude<keyof VisualDNA, 'usageMetadata'>, Rule>;
 
+// These timestamps/revisions describe operations rather than analytical content.
+// Everything else, including image bytes, ownership and calibration, is compared.
+const OPERATIONAL_FIELDS = new Set(['createdAt', 'updatedAt', 'revision']);
+const TOMBSTONE_SCHEMA: Record<string, Rule> = { id: 'string', ownerId: 'owner', deletedAt: 'number', cloudDeleted: 'boolean', cloudDocumentId: 'string' };
+
+export type GrimoireBackupRecord = Partial<Omit<VisualDNA, 'usageMetadata'>> & Pick<VisualDNA, 'id' | 'name' | 'imageUrl'> & {
+  imageType: 'unknown' | 'thumbnail' | 'full';
+};
+export type GrimoireBackupTombstone = Omit<DnaTombstone, 'storageKey'>;
 export interface GrimoireBackupFile {
-  format: typeof GRIMOIRE_BACKUP_FORMAT;
-  version: typeof GRIMOIRE_BACKUP_VERSION;
-  exportedAt: number;
-  libraryScope: {
-    ownerId: string | null;
-    isLegacy: boolean;
-    description: string;
-  };
-  records: GrimoireBackupRecord[];
-  tombstones?: GrimoireBackupTombstone[];
-  summary: {
-    totalRecords: number;
-    calibratedCount: number;
-    legacyCount: number;
-    thumbnailCount: number;
-    fullImageCount: number;
-  };
+  format: typeof GRIMOIRE_BACKUP_FORMAT; version: number; exportedAt: number;
+  libraryScope: { ownerId: string | null; isLegacy: boolean; description: string };
+  records: GrimoireBackupRecord[]; tombstones: GrimoireBackupTombstone[]; warnings: string[];
+  summary: { totalRecords: number; calibratedCount: number; legacyCount: number; thumbnailCount: number; fullImageCount: number; unknownImageCount: number };
 }
-
-export interface ConflictItem {
-  id: string;
-  name: string;
-  current: VisualDNA;
-  incoming: VisualDNA;
-  resolution: 'keep_current' | 'replace';
-}
-
-export interface DeletedConflictItem {
-  id: string;
-  name: string;
-  incoming: VisualDNA;
-  deletedAt: number;
-  resolution: 'keep_deleted' | 'restore';
-}
-
+export interface ConflictItem { id: string; name: string; current: VisualDNA; incoming: VisualDNA; resolution: 'keep_current' | 'replace' }
+export interface DeletedConflictItem { id: string; name: string; incoming: VisualDNA; deletedAt: number; resolution: 'keep_deleted' | 'restore' }
 export interface BackupPreviewResult {
-  valid: boolean;
-  error?: string;
-  fileScope?: {
-    ownerId: string | null;
-    isLegacy: boolean;
-    description: string;
-    exportedAt: number;
-  };
-  targetOwnerId: string | null;
-  scopeMismatch?: boolean;
-  scopeMismatchWarning?: string;
-  newRecords: VisualDNA[];
-  identicalRecords: VisualDNA[];
-  conflicts: ConflictItem[];
-  deletedConflicts: DeletedConflictItem[];
-  summary: {
-    totalIncoming: number;
-    newCount: number;
-    identicalCount: number;
-    conflictCount: number;
-    deletedConflictCount: number;
-  };
+  valid: boolean; error?: string; warnings?: string[]; previewToken?: object;
+  fileScope?: { ownerId: string | null; isLegacy: boolean; description: string; exportedAt: number };
+  targetOwnerId: string | null; scopeMismatch?: boolean; scopeMismatchWarning?: string;
+  newRecords: VisualDNA[]; identicalRecords: VisualDNA[]; conflicts: ConflictItem[]; deletedConflicts: DeletedConflictItem[];
+  summary: { totalIncoming: number; newCount: number; identicalCount: number; conflictCount: number; deletedConflictCount: number };
 }
-
-export interface BackupApplyPlan {
-  targetOwnerId: string | null;
-  newRecords: VisualDNA[];
-  conflictsToReplace: { current: VisualDNA; replacement: VisualDNA }[];
-  deletedToRestore: VisualDNA[];
-}
-
+export type BackupApplyPlan = BackupPreviewResult;
 export interface BackupApplyResult {
-  success: boolean;
-  appliedCount: number;
-  addedCount: number;
-  replacedCount: number;
-  restoredCount: number;
-  skippedCount: number;
-  error?: string;
+  success: boolean; appliedCount: number; addedCount: number; replacedCount: number; restoredCount: number; skippedCount: number;
+  tombstoneCount?: number; error?: string;
 }
 
-/**
- * Classifica se a imagem é miniatura (ex: <= 180px ou JPEG muito reduzido)
- * para transparência honesta no arquivo de backup.
- */
-export function classifyImageType(imageUrl: string): 'full' | 'thumbnail' {
-  if (!imageUrl) return 'thumbnail';
-  // Thumbnails do Grimoire são JPEG com dimensão máxima de 180x180 geradas pelo createThumbnail
-  // Se for data URL muito curta (< 12KB) ou identificada como thumb
-  if (imageUrl.length < 16384 && imageUrl.startsWith('data:image/jpeg')) {
-    return 'thumbnail';
+const isObject = (value: unknown): value is Record<string, any> => !!value && typeof value === 'object' && !Array.isArray(value);
+const own = (value: object, key: string) => Object.prototype.hasOwnProperty.call(value, key);
+const same = (a: unknown, b: unknown) => JSON.stringify(canonicalizeValue(a)) === JSON.stringify(canonicalizeValue(b));
+const nonempty = (value: unknown): value is string => typeof value === 'string' && value.trim().length > 0;
+const fail = (message: string): never => { throw new Error(message); };
+
+function projectValue(value: unknown, rule: Rule, path: string, strict: boolean): any {
+  if (typeof rule === 'string') {
+    if (rule === 'owner' ? value === null || nonempty(value) : typeof value === rule && (rule !== 'number' || Number.isFinite(value))) return value;
+    return fail(`Tipo incompatível em ${path}.`);
   }
-  return 'full';
+  if ('array' in rule) {
+    if (!Array.isArray(value)) return fail(`Lista inválida em ${path}.`);
+    return value.map((item, index) => projectValue(item, rule.array, `${path}[${index}]`, strict));
+  }
+  if ('dictionary' in rule) {
+    if (!isObject(value)) return fail(`Objeto inválido em ${path}.`);
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, projectValue(item, rule.dictionary, `${path}.${key}`, strict)]));
+  }
+  if ('shape' in rule) return projectObject(value, rule.shape, path, strict);
+  if ('values' in rule) {
+    if (typeof value === 'string' && rule.values.includes(value)) return value;
+    return fail(`Valor inválido em ${path}.`);
+  }
+  for (const alternative of rule.either) {
+    try { return projectValue(value, alternative, path, strict); } catch { /* historical representation */ }
+  }
+  return fail(`Tipo incompatível em ${path}.`);
 }
 
-/**
- * Exporta a biblioteca do escopo solicitado em formato JSON versionado.
- * Não altera registros, não faz chamadas de rede e preserva imagens completas locais.
- */
+function projectObject(value: unknown, schema: Record<string, Rule>, path: string, strict: boolean): Record<string, any> {
+  if (!isObject(value)) return fail(`Objeto inválido em ${path}.`);
+  if (strict) for (const key of Object.keys(value)) if (!own(schema, key)) fail(`Campo não permitido em ${path}.${key}.`);
+  const output: Record<string, any> = {};
+  for (const [key, rule] of Object.entries(schema)) {
+    if (own(value, key) && value[key] !== undefined) output[key] = projectValue(value[key], rule, `${path}.${key}`, strict);
+  }
+  return output;
+}
+
+function validateImage(value: string): void {
+  const match = /^data:image\/(png|jpeg|webp|gif);base64,([A-Za-z0-9+/]+={0,2})$/.exec(value);
+  if (!match || match[2].length % 4 !== 0) fail('Representação de imagem inválida; o backup exige bytes locais em data URL, sem URLs remotas.');
+  let bytes: string;
+  try { bytes = atob(match[2]); } catch { return fail('Imagem base64 inválida.'); }
+  const at = (i: number) => bytes.charCodeAt(i);
+  const png = bytes.startsWith('\x89PNG\r\n\x1a\n') && bytes.length >= 45 && bytes.slice(12, 16) === 'IHDR' && bytes.slice(-8, -4) === 'IEND';
+  const jpeg = bytes.length >= 20 && at(0) === 255 && at(1) === 216 && at(2) === 255 && at(bytes.length - 2) === 255 && at(bytes.length - 1) === 217;
+  const webp = bytes.length >= 20 && bytes.startsWith('RIFF') && bytes.slice(8, 12) === 'WEBP' && /^VP8[ LX]$/.test(bytes.slice(12, 16));
+  const gif = bytes.length >= 14 && /^(GIF87a|GIF89a)/.test(bytes) && bytes.endsWith(';');
+  if (!({ png, jpeg, webp, gif }[match[1]])) fail('Bytes da imagem incompatíveis com o formato declarado.');
+}
+
+function validateRecord(record: Record<string, any>, ownerId: string | null, warnings: Set<string>): VisualDNA {
+  if (!nonempty(record.id) || !nonempty(record.name) || typeof record.imageUrl !== 'string') fail('Registro sem id, nome ou imagem válidos.');
+  validateImage(record.imageUrl);
+  if (record.ownerId !== undefined && record.ownerId !== ownerId) fail('Proprietário do registro difere do escopo do arquivo.');
+  for (const key of OPERATIONAL_FIELDS) if (record[key] !== undefined && (!Number.isSafeInteger(record[key]) || record[key] < 0)) fail(`Metadado operacional inválido: ${key}.`);
+  const subjectIds = new Set<string>();
+  for (const subject of record.subjects || []) {
+    if (!nonempty(subject.id) || subjectIds.has(subject.id)) fail('Sujeito com id vazio ou duplicado.');
+    subjectIds.add(subject.id);
+  }
+  for (const relation of record.scaleRelationships || []) {
+    if (!nonempty(relation.relationship) || !subjectIds.has(relation.subjectA) || !subjectIds.has(relation.subjectB) || relation.subjectA === relation.subjectB) fail('Relação de escala inválida: sujeitos ausentes ou incompatíveis.');
+  }
+  if (Object.values(record.scores || {}).some(score => (score as number) < 0 || (score as number) > 1)) warnings.add('Notas legadas fora de 0–1 foram preservadas sem conversão nem recalibração.');
+  if (!record.analysisVersion || record.analysisVersion < 3 || !record.isCalibrated || record.calibrationVersion !== 3) warnings.add('Há registros legados ou sem calibração V3 comprovada; a restauração preserva essa procedência.');
+  return record as VisualDNA;
+}
+
+// Bytes alone cannot prove provenance, regardless of base64 length.
+export function classifyImageType(_imageUrl: string): 'unknown' { return 'unknown'; }
+
 export async function exportLibraryBackup(ownerId: string | null = captureDnaOperationContext().ownerId): Promise<GrimoireBackupFile> {
-  const records = await getLocalDNA(ownerId);
-  const tombstones = await getDnaTombstones(ownerId);
-
-  let calibratedCount = 0;
-  let legacyCount = 0;
-  let thumbnailCount = 0;
-  let fullImageCount = 0;
-
-  const backupRecords: GrimoireBackupRecord[] = records.map(rec => {
-    const isCalib = Boolean(rec.isCalibrated);
-    if (isCalib) calibratedCount++;
-    else legacyCount++;
-
-    const imgType = classifyImageType(rec.imageUrl);
-    if (imgType === 'thumbnail') thumbnailCount++;
-    else fullImageCount++;
-
-    return {
-      id: rec.id,
-      name: rec.name,
-      imageUrl: rec.imageUrl,
-      imageType: imgType,
-      summary: rec.summary,
-      linework: rec.linework,
-      rendering: rec.rendering,
-      palette: rec.palette,
-      silhouette: rec.silhouette,
-      pose: rec.pose,
-      framing: rec.framing,
-      composition: rec.composition,
-      lighting: rec.lighting,
-      effects: rec.effects,
-      materials: rec.materials,
-      details: rec.details,
-      background: rec.background,
-      hierarchy: rec.hierarchy,
-      positivePrompt: rec.positivePrompt,
-      negativePrompt: rec.negativePrompt,
-      tags: rec.tags ? [...rec.tags] : [],
-      scores: rec.scores ? { ...rec.scores } : {},
-      profile: (rec as any).profile ? structuredClone((rec as any).profile) : undefined,
-      subjectProfile: rec.subjectProfile ? structuredClone(rec.subjectProfile) : undefined,
-      scoreJustifications: rec.scoreJustifications ? structuredClone(rec.scoreJustifications) : undefined,
-      isCalibrated: rec.isCalibrated,
-      calibrationVersion: rec.calibrationVersion,
-      analysisStatus: rec.analysisStatus,
-      createdAt: rec.createdAt,
-      updatedAt: rec.updatedAt,
-      revision: rec.revision,
-      imageFingerprint: rec.imageFingerprint,
-    };
+  const context = captureDnaOperationContext();
+  if (ownerId !== null && ownerId !== context.ownerId) fail('Não é permitido exportar outra conta.');
+  const snapshot = await readDnaBackupSnapshot(ownerId);
+  assertDnaOperationContext(context);
+  const warnings = new Set<string>(['As imagens disponíveis localmente foram preservadas sem recompressão. A procedência como imagem original não está comprovada.']);
+  const records = snapshot.records.map(record => {
+    const projected = projectObject(record, RECORD_SCHEMA, 'record', false);
+    validateRecord(projected, ownerId, warnings);
+    return { ...projected, imageType: classifyImageType(record.imageUrl) } as GrimoireBackupRecord;
   });
-
-  const backupTombstones: GrimoireBackupTombstone[] = tombstones.map(t => ({
-    id: t.id,
-    deletedAt: t.deletedAt,
-  }));
-
-  const backupFile: GrimoireBackupFile = {
-    format: GRIMOIRE_BACKUP_FORMAT,
-    version: GRIMOIRE_BACKUP_VERSION,
-    exportedAt: Date.now(),
-    libraryScope: {
-      ownerId,
-      isLegacy: ownerId === null,
-      description: ownerId === null ? 'Biblioteca Legada (Sem conta vinculada)' : `Biblioteca Pessoal (${ownerId})`,
-    },
-    records: backupRecords,
-    tombstones: backupTombstones.length > 0 ? backupTombstones : undefined,
-    summary: {
-      totalRecords: backupRecords.length,
-      calibratedCount,
-      legacyCount,
-      thumbnailCount,
-      fullImageCount,
-    },
-  };
-
-  return backupFile;
-}
-
-/**
- * Valida o arquivo completo e prepara a prévia de restauração com comparação
- * de novos registros, conflitos, idênticos e exclusões prévias.
- */
-export async function validateAndPreviewBackup(
-  jsonText: string,
-  targetOwnerId: string | null = captureDnaOperationContext().ownerId
-): Promise<BackupPreviewResult> {
-  let parsed: any;
-  try {
-    parsed = JSON.parse(jsonText);
-  } catch {
-    return {
-      valid: false,
-      error: 'Arquivo inválido: JSON corrompido ou malformado.',
-      targetOwnerId,
-      newRecords: [],
-      identicalRecords: [],
-      conflicts: [],
-      deletedConflicts: [],
-      summary: { totalIncoming: 0, newCount: 0, identicalCount: 0, conflictCount: 0, deletedConflictCount: 0 },
-    };
-  }
-
-  if (!parsed || typeof parsed !== 'object') {
-    return {
-      valid: false,
-      error: 'Estrutura de arquivo inválida: o conteúdo não é um objeto JSON.',
-      targetOwnerId,
-      newRecords: [],
-      identicalRecords: [],
-      conflicts: [],
-      deletedConflicts: [],
-      summary: { totalIncoming: 0, newCount: 0, identicalCount: 0, conflictCount: 0, deletedConflictCount: 0 },
-    };
-  }
-
-  if (parsed.format !== GRIMOIRE_BACKUP_FORMAT) {
-    return {
-      valid: false,
-      error: `Formato de backup não reconhecido: "${parsed.format}". Esperado "${GRIMOIRE_BACKUP_FORMAT}".`,
-      targetOwnerId,
-      newRecords: [],
-      identicalRecords: [],
-      conflicts: [],
-      deletedConflicts: [],
-      summary: { totalIncoming: 0, newCount: 0, identicalCount: 0, conflictCount: 0, deletedConflictCount: 0 },
-    };
-  }
-
-  if (parsed.version !== GRIMOIRE_BACKUP_VERSION) {
-    return {
-      valid: false,
-      error: `Versão de backup não suportada: ${parsed.version}. Esta versão do Grimoire suporta a versão ${GRIMOIRE_BACKUP_VERSION}.`,
-      targetOwnerId,
-      newRecords: [],
-      identicalRecords: [],
-      conflicts: [],
-      deletedConflicts: [],
-      summary: { totalIncoming: 0, newCount: 0, identicalCount: 0, conflictCount: 0, deletedConflictCount: 0 },
-    };
-  }
-
-  if (!Array.isArray(parsed.records)) {
-    return {
-      valid: false,
-      error: 'O arquivo de backup não contém uma lista válida de referências ("records").',
-      targetOwnerId,
-      newRecords: [],
-      identicalRecords: [],
-      conflicts: [],
-      deletedConflicts: [],
-      summary: { totalIncoming: 0, newCount: 0, identicalCount: 0, conflictCount: 0, deletedConflictCount: 0 },
-    };
-  }
-
-  // Validação de registros individuais e detecção de IDs duplicados no próprio arquivo
-  const seenIds = new Set<string>();
-  const incomingRecords: VisualDNA[] = [];
-
-  for (let i = 0; i < parsed.records.length; i++) {
-    const r = parsed.records[i];
-    if (!r || typeof r !== 'object') {
-      return {
-        valid: false,
-        error: `Registro no índice ${i} está malformado.`,
-        targetOwnerId,
-        newRecords: [],
-        identicalRecords: [],
-        conflicts: [],
-        deletedConflicts: [],
-        summary: { totalIncoming: 0, newCount: 0, identicalCount: 0, conflictCount: 0, deletedConflictCount: 0 },
-      };
-    }
-    if (!r.id || typeof r.id !== 'string') {
-      return {
-        valid: false,
-        error: `Registro no índice ${i} não possui um "id" textual válido.`,
-        targetOwnerId,
-        newRecords: [],
-        identicalRecords: [],
-        conflicts: [],
-        deletedConflicts: [],
-        summary: { totalIncoming: 0, newCount: 0, identicalCount: 0, conflictCount: 0, deletedConflictCount: 0 },
-      };
-    }
-    if (seenIds.has(r.id)) {
-      return {
-        valid: false,
-        error: `O arquivo de backup contém ID duplicado: "${r.id}". Arquivo inconsistente.`,
-        targetOwnerId,
-        newRecords: [],
-        identicalRecords: [],
-        conflicts: [],
-        deletedConflicts: [],
-        summary: { totalIncoming: 0, newCount: 0, identicalCount: 0, conflictCount: 0, deletedConflictCount: 0 },
-      };
-    }
-    seenIds.add(r.id);
-
-    if (!r.name || typeof r.name !== 'string') {
-      return {
-        valid: false,
-        error: `O registro "${r.id}" não possui um nome válido.`,
-        targetOwnerId,
-        newRecords: [],
-        identicalRecords: [],
-        conflicts: [],
-        deletedConflicts: [],
-        summary: { totalIncoming: 0, newCount: 0, identicalCount: 0, conflictCount: 0, deletedConflictCount: 0 },
-      };
-    }
-    if (!r.imageUrl || typeof r.imageUrl !== 'string') {
-      return {
-        valid: false,
-        error: `O registro "${r.name}" (${r.id}) não possui imagem válida.`,
-        targetOwnerId,
-        newRecords: [],
-        identicalRecords: [],
-        conflicts: [],
-        deletedConflicts: [],
-        summary: { totalIncoming: 0, newCount: 0, identicalCount: 0, conflictCount: 0, deletedConflictCount: 0 },
-      };
-    }
-
-    incomingRecords.push({
-      ...r,
-      ownerId: targetOwnerId, // Associa ao escopo de destino após a confirmação
-    });
-  }
-
-  // Verificação de escopo (origem vs destino)
-  const backupOwnerId = parsed.libraryScope?.ownerId ?? null;
-  const isLegacyBackup = parsed.libraryScope?.isLegacy ?? (backupOwnerId === null);
-  let scopeMismatch = false;
-  let scopeMismatchWarning: string | undefined;
-
-  if (targetOwnerId === null && !isLegacyBackup) {
-    scopeMismatch = true;
-    scopeMismatchWarning = `Este backup pertence a uma conta de usuário (${backupOwnerId}), mas você está atualmente no acervo local desconectado.`;
-  } else if (targetOwnerId !== null && backupOwnerId !== null && backupOwnerId !== targetOwnerId) {
-    scopeMismatch = true;
-    scopeMismatchWarning = `Este backup pertence à conta "${backupOwnerId}", mas você está conectado como "${targetOwnerId}". Backups de outras contas não são misturados automaticamente.`;
-  }
-
-  // Carrega estado local atual para categorizar registros
-  const currentRecords = await getLocalDNA(targetOwnerId);
-  const currentTombstones = await getDnaTombstones(targetOwnerId);
-
-  const currentMap = new Map<string, VisualDNA>();
-  for (const item of currentRecords) {
-    currentMap.set(item.id, item);
-  }
-
-  const tombstoneMap = new Map<string, DnaTombstone>();
-  for (const t of currentTombstones) {
-    tombstoneMap.set(t.id, t);
-  }
-
-  const newRecords: VisualDNA[] = [];
-  const identicalRecords: VisualDNA[] = [];
-  const conflicts: ConflictItem[] = [];
-  const deletedConflicts: DeletedConflictItem[] = [];
-
-  for (const inc of incomingRecords) {
-    const existing = currentMap.get(inc.id);
-    const tombstone = tombstoneMap.get(inc.id);
-
-    if (tombstone && !existing) {
-      // Registro foi explicitamente excluído anteriormente pelo usuário
-      deletedConflicts.push({
-        id: inc.id,
-        name: inc.name,
-        incoming: inc,
-        deletedAt: tombstone.deletedAt,
-        resolution: 'keep_deleted',
-      });
-    } else if (existing) {
-      // Registro já existe: compara conteúdo canônico
-      if (areRecordsSubstantivelyEqual(existing, inc)) {
-        identicalRecords.push(inc);
-      } else {
-        conflicts.push({
-          id: inc.id,
-          name: inc.name,
-          current: existing,
-          incoming: inc,
-          resolution: 'keep_current',
-        });
-      }
-    } else {
-      // Registro novo
-      newRecords.push(inc);
-    }
-  }
-
+  const tombstones = snapshot.tombstones.map(t => projectObject(t, TOMBSTONE_SCHEMA, 'tombstone', false) as GrimoireBackupTombstone);
+  const calibratedCount = records.filter(r => r.isCalibrated === true && r.calibrationVersion === 3 && Object.values(r.scores || {}).every(score => typeof score === 'number' && score >= 0 && score <= 1)).length;
   return {
-    valid: true,
-    fileScope: {
-      ownerId: backupOwnerId,
-      isLegacy: isLegacyBackup,
-      description: parsed.libraryScope?.description || (isLegacyBackup ? 'Biblioteca Legada' : 'Biblioteca Pessoal'),
-      exportedAt: parsed.exportedAt || 0,
-    },
-    targetOwnerId,
-    scopeMismatch,
-    scopeMismatchWarning,
-    newRecords,
-    identicalRecords,
-    conflicts,
-    deletedConflicts,
-    summary: {
-      totalIncoming: incomingRecords.length,
-      newCount: newRecords.length,
-      identicalCount: identicalRecords.length,
-      conflictCount: conflicts.length,
-      deletedConflictCount: deletedConflicts.length,
-    },
+    format: GRIMOIRE_BACKUP_FORMAT, version: GRIMOIRE_BACKUP_VERSION, exportedAt: Date.now(),
+    libraryScope: { ownerId, isLegacy: ownerId === null, description: ownerId === null ? 'Biblioteca Legada (Sem conta vinculada)' : `Biblioteca Pessoal (${ownerId})` },
+    records, tombstones, warnings: [...warnings],
+    summary: { totalRecords: records.length, calibratedCount, legacyCount: records.length - calibratedCount, thumbnailCount: 0, fullImageCount: 0, unknownImageCount: records.length },
   };
 }
 
-function areRecordsSubstantivelyEqual(a: VisualDNA, b: VisualDNA): boolean {
-  // Compara campos de dados essenciais sem falsos positivos de timestamps
-  const fieldsA = {
-    name: a.name,
-    imageUrl: a.imageUrl,
-    summary: a.summary,
-    linework: a.linework,
-    rendering: a.rendering,
-    palette: a.palette,
-    silhouette: a.silhouette,
-    pose: a.pose,
-    framing: a.framing,
-    composition: a.composition,
-    lighting: a.lighting,
-    effects: a.effects,
-    materials: a.materials,
-    details: a.details,
-    background: a.background,
-    hierarchy: a.hierarchy,
-    tags: a.tags,
-    scores: a.scores,
-    positivePrompt: a.positivePrompt,
-    negativePrompt: a.negativePrompt,
-    profile: (a as any).profile,
-    subjectProfile: a.subjectProfile,
-    scoreJustifications: a.scoreJustifications,
-  };
-
-  const fieldsB = {
-    name: b.name,
-    imageUrl: b.imageUrl,
-    summary: b.summary,
-    linework: b.linework,
-    rendering: b.rendering,
-    palette: b.palette,
-    silhouette: b.silhouette,
-    pose: b.pose,
-    framing: b.framing,
-    composition: b.composition,
-    lighting: b.lighting,
-    effects: b.effects,
-    materials: b.materials,
-    details: b.details,
-    background: b.background,
-    hierarchy: b.hierarchy,
-    tags: b.tags,
-    scores: b.scores,
-    positivePrompt: b.positivePrompt,
-    negativePrompt: b.negativePrompt,
-    profile: (b as any).profile,
-    subjectProfile: b.subjectProfile,
-    scoreJustifications: b.scoreJustifications,
-  };
-
-  return JSON.stringify(canonicalizeValue(fieldsA)) === JSON.stringify(canonicalizeValue(fieldsB));
-}
-
-/**
- * Aplica o plano de restauração validado e explicitamente confirmado pelo usuário.
- * Operação 100% LOCAL: usa saveLocalDNA, sem chamadas ao Gemini ou Firestore.
- */
-export async function applyBackupRestoration(plan: BackupApplyPlan): Promise<BackupApplyResult> {
-  const currentContext = captureDnaOperationContext();
-  if (currentContext.ownerId !== plan.targetOwnerId) {
-    return {
-      success: false,
-      appliedCount: 0,
-      addedCount: 0,
-      replacedCount: 0,
-      restoredCount: 0,
-      skippedCount: 0,
-      error: 'A conta ativa mudou durante a confirmação da restauração. Operação cancelada.',
-    };
+function readBackup(text: string) {
+  let parsed: any;
+  try { parsed = JSON.parse(text); } catch { return fail('Arquivo inválido: JSON corrompido ou malformado.'); }
+  if (!isObject(parsed)) fail('Estrutura de arquivo inválida.');
+  const envelopeFields = new Set(['format', 'version', 'exportedAt', 'libraryScope', 'records', 'tombstones', 'warnings', 'summary']);
+  for (const key of Object.keys(parsed)) if (!envelopeFields.has(key)) fail(`Campo não permitido no arquivo: ${key}.`);
+  if (parsed.format !== GRIMOIRE_BACKUP_FORMAT) fail('Formato de backup não reconhecido.');
+  if (parsed.version !== 1 && parsed.version !== 2) fail(`Versão de backup não suportada: ${parsed.version}.`);
+  if (parsed.warnings !== undefined) projectValue(parsed.warnings, strings, 'warnings', true);
+  if (parsed.summary !== undefined) {
+    const summary = projectObject(parsed.summary, {
+      totalRecords: 'number', calibratedCount: 'number', legacyCount: 'number', thumbnailCount: 'number', fullImageCount: 'number', unknownImageCount: 'number',
+    }, 'summary', true);
+    if (Object.values(summary).some(count => !Number.isSafeInteger(count) || count < 0)) fail('Contagens inválidas no resumo do backup.');
   }
+  const scope = projectObject(parsed.libraryScope, { ownerId: 'owner', isLegacy: 'boolean', description: 'string' }, 'libraryScope', true);
+  if (!own(scope, 'ownerId') || scope.isLegacy !== (scope.ownerId === null)) fail('Escopo/proprietário de backup inválido.');
+  if (parsed.exportedAt !== undefined && (typeof parsed.exportedAt !== 'number' || !Number.isFinite(parsed.exportedAt) || parsed.exportedAt < 0)) fail('Data de exportação inválida.');
+  if (!Array.isArray(parsed.records) || (parsed.tombstones !== undefined && !Array.isArray(parsed.tombstones))) fail('Listas de registros ou exclusões inválidas.');
+  const warnings = new Set<string>();
+  if (parsed.version === 1) warnings.add('Backup V1 incompleto: campos ausentes serão preservados nas substituições; informações nunca exportadas não podem ser recuperadas.');
+  const ids = new Set<string>();
+  for (const record of parsed.records) {
+    if (!isObject(record) || !nonempty(record.id)) fail('Registro com id vazio ou inválido.');
+    if (ids.has(record.id)) fail(`ID duplicado no backup: ${record.id}.`);
+    ids.add(record.id);
+  }
+  const records = parsed.records.map((raw: any) => {
+    const { imageType, profile, ...data } = raw;
+    if (imageType !== undefined && !['full', 'thumbnail', 'unknown'].includes(imageType)) fail('Tipo de procedência da imagem inválido.');
+    if (profile !== undefined) {
+      if (parsed.version !== 1) fail('Campo profile desconhecido no contrato VisualDNA.');
+      warnings.add('O campo profile do formato V1 não possui contrato analítico definido e não será persistido.');
+    }
+    warnings.add(imageType === 'thumbnail' ? 'O arquivo contém miniaturas recuperáveis; elas não recuperam as imagens originais.' : 'As imagens serão preservadas como disponíveis no arquivo; a procedência original não está comprovada.');
+    return validateRecord(projectObject(data, RECORD_SCHEMA, 'record', true), scope.ownerId, warnings);
+  }) as VisualDNA[];
+  const deletionIds = new Set<string>();
+  const tombstones = (parsed.tombstones || []).map((raw: unknown) => {
+    const t = projectObject(raw, TOMBSTONE_SCHEMA, 'tombstone', true);
+    if (!nonempty(t.id) || deletionIds.has(t.id) || ids.has(t.id)) fail('Exclusão com id vazio, duplicado ou conflitante com registro ativo no arquivo.');
+    if (!Number.isSafeInteger(t.deletedAt) || t.deletedAt < 0) fail('Data da intenção de exclusão inválida.');
+    if (t.ownerId !== undefined && t.ownerId !== scope.ownerId) fail('Exclusão pertence a outro proprietário.');
+    if (parsed.version === 2 && (t.ownerId === undefined || t.cloudDeleted === undefined)) fail('Metadados da intenção de exclusão V2 incompletos.');
+    deletionIds.add(t.id);
+    return { ...t, ownerId: scope.ownerId, cloudDeleted: t.cloudDeleted ?? false, storageKey: JSON.stringify([scope.ownerId, t.id]) } as DnaTombstone;
+  });
+  return { records, tombstones, warnings: [...warnings], version: parsed.version as number, scope, exportedAt: parsed.exportedAt ?? 0 };
+}
 
-  let addedCount = 0;
-  let replacedCount = 0;
-  let restoredCount = 0;
-  let skippedCount = 0;
+function mergeLegacy(current: any, incoming: any): any {
+  if (!isObject(current) || !isObject(incoming)) return structuredClone(incoming);
+  const merged = structuredClone(current);
+  for (const key of Object.keys(incoming)) merged[key] = mergeLegacy(current[key], incoming[key]);
+  return merged;
+}
 
+// A V1 omission preserves current content, but cannot certify newly imported
+// analytical evidence using the current record's calibration claim.
+const CALIBRATION_INDEPENDENT_FIELDS = new Set([
+  ...OPERATIONAL_FIELDS, 'id', 'name', 'imageUrl', 'ownerId', 'cloudDocumentId', 'imageFingerprint',
+  'isCalibrated', 'calibrationVersion',
+]);
+
+export function areRecordsSubstantivelyEqual(a: VisualDNA, b: VisualDNA): boolean {
+  const content = (record: VisualDNA) => {
+    const projected = projectObject(record, RECORD_SCHEMA, 'record', false);
+    for (const key of OPERATIONAL_FIELDS) delete projected[key];
+    return projected;
+  };
+  return same(content(a), content(b));
+}
+
+function validateCloudLink(value: { id: string; cloudDocumentId?: string }, ownerId: string | null, trusted?: string): void {
+  const link = value.cloudDocumentId;
+  if (link === undefined) return;
+  if (!nonempty(link) || link.includes('/')) fail('Identificador cloud inválido no backup.');
+  const scoped = ownerId === null ? undefined : `${encodeURIComponent(ownerId)}:${encodeURIComponent(value.id)}`;
+  // Legacy document ids matched reference ids. Other aliases need an existing
+  // local association; an imported file cannot authorize arbitrary cloud paths.
+  if (link !== trusted && link !== scoped && !(link === value.id && !link.includes(':'))) fail('Vínculo cloud não comprovado para este proprietário. A restauração foi bloqueada.');
+}
+
+interface PreparedPreview {
+  context: DnaOperationContext; targetOwnerId: string | null; invalidated: boolean; applied: boolean;
+  records: Map<string, VisualDNA>; tombstones: Map<string, DnaTombstone>;
+  incoming: Map<string, VisualDNA>; categories: Map<string, 'new' | 'identical' | 'conflict' | 'deleted'>;
+  deletionChanges: DnaTombstone[];
+}
+const preparedPreviews = new WeakMap<object, PreparedPreview>();
+let activePreview: PreparedPreview | undefined;
+let previewGeneration = 0;
+const applyingScopes = new Set<string | null>();
+subscribeDnaChanges(() => {
+  if (activePreview && !isDnaOperationContextCurrent(activePreview.context)) activePreview.invalidated = true;
+});
+
+export async function validateAndPreviewBackup(jsonText: string, targetOwnerId: string | null = captureDnaOperationContext().ownerId): Promise<BackupPreviewResult> {
+  const empty: BackupPreviewResult = { valid: false, targetOwnerId, newRecords: [], identicalRecords: [], conflicts: [], deletedConflicts: [], summary: { totalIncoming: 0, newCount: 0, identicalCount: 0, conflictCount: 0, deletedConflictCount: 0 } };
+  const context = captureDnaOperationContext();
+  const generation = ++previewGeneration;
+  if (activePreview) activePreview.invalidated = true;
+  const pending = { invalidated: false };
+  const unsubscribe = subscribeDnaChanges(() => { if (!isDnaOperationContextCurrent(context)) pending.invalidated = true; });
   try {
-    assertDnaOperationContext({ ownerId: plan.targetOwnerId });
-
-    // 1. Gravar registros novos
-    for (const record of plan.newRecords) {
-      assertDnaOperationContext({ ownerId: plan.targetOwnerId });
-      const toSave: VisualDNA = {
-        ...record,
-        ownerId: plan.targetOwnerId,
-        updatedAt: Date.now(),
-      };
-      await saveLocalDNA(toSave, plan.targetOwnerId, null, false);
-      addedCount++;
+    const data = readBackup(jsonText);
+    if (targetOwnerId !== context.ownerId || data.scope.ownerId !== targetOwnerId) {
+      return { ...empty, scopeMismatch: true, error: `Backup do escopo ${data.scope.ownerId ?? 'legado'} não pode ser restaurado no escopo ${targetOwnerId ?? 'legado'}. Nenhuma reassociação será feita.`, scopeMismatchWarning: `Origem: ${data.scope.ownerId ?? 'legado'}; destino: ${targetOwnerId ?? 'legado'}.` };
     }
-
-    // 2. Gravar conflitos explicitamente escolhidos para substituição
-    for (const conflict of plan.conflictsToReplace) {
-      assertDnaOperationContext({ ownerId: plan.targetOwnerId });
-      const toSave: VisualDNA = {
-        ...conflict.replacement,
-        ownerId: plan.targetOwnerId,
-        updatedAt: Date.now(),
-        revision: (conflict.current.revision ?? 1) + 1,
-      };
-      await saveLocalDNA(toSave, plan.targetOwnerId, conflict.current, false);
-      replacedCount++;
+    const snapshot = await readDnaBackupSnapshot(targetOwnerId);
+    assertDnaOperationContext(context);
+    if (generation !== previewGeneration) fail('Uma prévia mais recente substituiu este arquivo.');
+    if (pending.invalidated) fail('A conta mudou durante a preparação da prévia.');
+    const records = new Map(snapshot.records.map(record => [record.id, record]));
+    const tombstones = new Map(snapshot.tombstones.map(t => [t.id, t]));
+    const incoming = new Map<string, VisualDNA>();
+    const categories: PreparedPreview['categories'] = new Map();
+    const preview: BackupPreviewResult = { ...empty, valid: true, warnings: data.warnings, previewToken: {}, fileScope: { ownerId: data.scope.ownerId, isLegacy: data.scope.isLegacy, description: data.scope.description || 'Biblioteca', exportedAt: data.exportedAt } };
+    for (const record of data.records) {
+      const current = records.get(record.id);
+      const deleted = tombstones.get(record.id);
+      if (current && deleted) fail('Estado local inconsistente: referência ativa e exclusão com o mesmo ID.');
+      const trustedLink = current?.cloudDocumentId ?? deleted?.cloudDocumentId;
+      validateCloudLink(record, targetOwnerId, trustedLink);
+      if (trustedLink && record.cloudDocumentId && trustedLink !== record.cloudDocumentId) fail('O vínculo cloud local difere do backup; restauração bloqueada.');
+      const projected = projectObject(record, RECORD_SCHEMA, 'record', false);
+      const replacement = (data.version === 1 && current ? mergeLegacy(projectObject(current, RECORD_SCHEMA, 'current', false), projected) : projected) as VisualDNA;
+      replacement.ownerId = targetOwnerId;
+      if (!replacement.cloudDocumentId && trustedLink) replacement.cloudDocumentId = trustedLink;
+      if (data.version === 1 && current && replacement.isCalibrated && (record.isCalibrated === undefined || record.calibrationVersion === undefined) &&
+          (current.isCalibrated !== replacement.isCalibrated || current.calibrationVersion !== replacement.calibrationVersion ||
+           Object.keys(replacement).some(key => !CALIBRATION_INDEPENDENT_FIELDS.has(key) && !same(replacement[key as keyof VisualDNA], current[key as keyof VisualDNA])))) {
+        replacement.isCalibrated = false;
+        preview.warnings!.push('O backup V1 não comprova a calibração do conteúdo combinado. As notas serão preservadas e a calibração herdada não será aplicada.');
+      }
+      // Inherited relations must still refer to the subjects in the final plan.
+      const mergedWarnings = new Set(preview.warnings);
+      validateRecord(replacement, targetOwnerId, mergedWarnings);
+      preview.warnings = [...mergedWarnings];
+      incoming.set(record.id, replacement);
+      if (deleted) {
+        categories.set(record.id, 'deleted'); preview.deletedConflicts.push({ id: record.id, name: record.name, incoming: structuredClone(replacement), deletedAt: deleted.deletedAt, resolution: 'keep_deleted' });
+      } else if (!current) {
+        categories.set(record.id, 'new'); preview.newRecords.push(structuredClone(replacement));
+      } else if (areRecordsSubstantivelyEqual({ ...current, ownerId: targetOwnerId }, replacement)) {
+        categories.set(record.id, 'identical'); preview.identicalRecords.push(structuredClone(replacement));
+      } else {
+        categories.set(record.id, 'conflict'); preview.conflicts.push({ id: record.id, name: record.name, current: structuredClone(current), incoming: structuredClone(replacement), resolution: 'keep_current' });
+      }
     }
-
-    // 3. Restaurar registros explicitamente ressuscitados (anteriormente excluídos)
-    for (const deletedRecord of plan.deletedToRestore) {
-      assertDnaOperationContext({ ownerId: plan.targetOwnerId });
-      const toSave: VisualDNA = {
-        ...deletedRecord,
-        ownerId: plan.targetOwnerId,
-        updatedAt: Date.now(),
-      };
-      // allowRestore = true para remover a tombstone
-      await saveLocalDNA(toSave, plan.targetOwnerId, null, true);
-      restoredCount++;
+    const deletionChanges: DnaTombstone[] = [];
+    for (const tombstone of data.tombstones) {
+      if (records.has(tombstone.id)) fail(`A exclusão importada de "${tombstone.id}" atinge uma referência ativa. Os controles atuais não autorizam essa exclusão; nenhum item será restaurado.`);
+      const current = tombstones.get(tombstone.id);
+      validateCloudLink(tombstone, targetOwnerId, current?.cloudDocumentId);
+      if (current?.cloudDocumentId && tombstone.cloudDocumentId && current.cloudDocumentId !== tombstone.cloudDocumentId) fail('Vínculo cloud de exclusão conflitante.');
+      if (!current || tombstone.deletedAt > current.deletedAt) deletionChanges.push({ ...tombstone, ...(current?.cloudDocumentId && !tombstone.cloudDocumentId ? { cloudDocumentId: current.cloudDocumentId } : {}) });
     }
+    if (data.tombstones.length) preview.warnings = [...preview.warnings!, `${deletionChanges.length} intenções de exclusão serão preservadas localmente; sem operações cloud nesta restauração.`];
+    preview.summary = { totalIncoming: data.records.length, newCount: preview.newRecords.length, identicalCount: preview.identicalRecords.length, conflictCount: preview.conflicts.length, deletedConflictCount: preview.deletedConflicts.length };
+    const prepared: PreparedPreview = { context, targetOwnerId, invalidated: false, applied: false, records, tombstones, incoming, categories, deletionChanges };
+    preparedPreviews.set(preview.previewToken!, prepared); activePreview = prepared;
+    return preview;
+  } catch (error) { return { ...empty, error: error instanceof Error ? error.message : String(error) }; }
+  finally { unsubscribe(); }
+}
 
-    notifyDnaChanges();
-
-    return {
-      success: true,
-      appliedCount: addedCount + replacedCount + restoredCount,
-      addedCount,
-      replacedCount,
-      restoredCount,
-      skippedCount,
-    };
-  } catch (err: any) {
-    return {
-      success: false,
-      appliedCount: addedCount + replacedCount + restoredCount,
-      addedCount,
-      replacedCount,
-      restoredCount,
-      skippedCount,
-      error: err instanceof Error ? err.message : String(err),
-    };
-  }
+export async function applyBackupRestoration(preview: BackupApplyPlan): Promise<BackupApplyResult> {
+  const failed = (error: string): BackupApplyResult => ({ success: false, appliedCount: 0, addedCount: 0, replacedCount: 0, restoredCount: 0, skippedCount: 0, error });
+  const prepared = preview?.previewToken && preparedPreviews.get(preview.previewToken);
+  if (!preview?.valid || !prepared || prepared.invalidated || prepared.applied || preview.targetOwnerId !== prepared.targetOwnerId) return failed('Prévia inválida ou expirada. Prepare uma nova prévia antes de confirmar.');
+  const { targetOwnerId } = prepared;
+  if (applyingScopes.has(targetOwnerId)) return failed('Uma restauração já está em andamento.');
+  applyingScopes.add(targetOwnerId); // Before the first await, independent of React state.
+  try {
+    assertDnaOperationContext(prepared.context);
+    const mutations: DnaBackupMutation[] = [];
+    let addedCount = 0, replacedCount = 0, restoredCount = 0, skippedCount = 0;
+    for (const [id, record] of prepared.incoming) {
+      const category = prepared.categories.get(id);
+      const replace = preview.conflicts.find(item => item.id === id)?.resolution === 'replace';
+      const restore = preview.deletedConflicts.find(item => item.id === id)?.resolution === 'restore';
+      if (category === 'identical' || (category === 'conflict' && !replace) || (category === 'deleted' && !restore)) { skippedCount++; continue; }
+      const current = prepared.records.get(id) ?? null;
+      const deleted = prepared.tombstones.get(id) ?? null;
+      const revision = Math.max(current?.revision ?? 0, record.revision ?? 0) + 1;
+      const updatedAt = Math.max(Date.now(), current?.updatedAt ?? 0, record.updatedAt ?? 0, deleted?.deletedAt ?? 0) + 1;
+      if (!Number.isSafeInteger(revision) || !Number.isSafeInteger(updatedAt)) fail('Metadados excedem o intervalo seguro para restauração.');
+      mutations.push({ id, expectedRecord: current, expectedTombstone: deleted, record: { ...record, ownerId: targetOwnerId, revision, updatedAt, ...(current?.createdAt !== undefined ? { createdAt: current.createdAt } : {}) } });
+      if (category === 'new') addedCount++; else if (category === 'conflict') replacedCount++; else restoredCount++;
+    }
+    for (const tombstone of prepared.deletionChanges) mutations.push({ id: tombstone.id, expectedRecord: null, expectedTombstone: prepared.tombstones.get(tombstone.id) ?? null, tombstone });
+    await applyLocalDnaBackup(targetOwnerId, mutations);
+    prepared.applied = true;
+    return { success: true, appliedCount: addedCount + replacedCount + restoredCount, addedCount, replacedCount, restoredCount, skippedCount, tombstoneCount: prepared.deletionChanges.length };
+  } catch (error) { return failed(error instanceof Error ? error.message : String(error)); }
+  finally { applyingScopes.delete(targetOwnerId); }
 }

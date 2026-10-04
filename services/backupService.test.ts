@@ -94,12 +94,7 @@ describe('Backup and Restoration Service', () => {
     expect(preview.valid).toBe(true);
     expect(preview.newRecords).toHaveLength(1);
 
-    const applyResult = await applyBackupRestoration({
-      targetOwnerId: 'user-123',
-      newRecords: preview.newRecords,
-      conflictsToReplace: [],
-      deletedToRestore: []
-    });
+    const applyResult = await applyBackupRestoration(preview);
 
     expect(applyResult.success).toBe(true);
     expect(applyResult.appliedCount).toBe(1);
@@ -202,23 +197,15 @@ describe('Backup and Restoration Service', () => {
     expect(preview.conflicts[0].resolution).toBe('keep_current');
 
     // Cenário A: Mantém o atual (nenhum replace enviado)
-    await applyBackupRestoration({
-      targetOwnerId: 'user-A',
-      newRecords: [],
-      conflictsToReplace: [],
-      deletedToRestore: []
-    });
+    expect((await applyBackupRestoration(preview)).success).toBe(true);
 
     const currentRecords = await getLocalDNA('user-A');
     expect(currentRecords[0].name).toBe('Arcane Archmage');
 
     // Cenário B: Escolha explícita de substituir
-    await applyBackupRestoration({
-      targetOwnerId: 'user-A',
-      newRecords: [],
-      conflictsToReplace: [{ current: currentRecords[0], replacement: conflictingBackupRecord }],
-      deletedToRestore: []
-    });
+    const replacementPreview = await validateAndPreviewBackup(JSON.stringify(backupFile), 'user-A');
+    replacementPreview.conflicts[0].resolution = 'replace';
+    expect((await applyBackupRestoration(replacementPreview)).success).toBe(true);
 
     const updatedRecords = await getLocalDNA('user-A');
     expect(updatedRecords[0].name).toBe('Arcane Archmage (Backup Version)');
@@ -248,23 +235,15 @@ describe('Backup and Restoration Service', () => {
     expect(preview.deletedConflicts[0].resolution).toBe('keep_deleted');
 
     // Sem escolha explícita, o item NÃO é ressuscitado
-    await applyBackupRestoration({
-      targetOwnerId: 'user-A',
-      newRecords: [],
-      conflictsToReplace: [],
-      deletedToRestore: []
-    });
+    expect((await applyBackupRestoration(preview)).success).toBe(true);
 
     const afterIgnored = await getLocalDNA('user-A');
     expect(afterIgnored).toHaveLength(0);
 
     // Com escolha explícita, ressuscita e limpa a tombstone
-    await applyBackupRestoration({
-      targetOwnerId: 'user-A',
-      newRecords: [],
-      conflictsToReplace: [],
-      deletedToRestore: [sampleDna1]
-    });
+    const restorationPreview = await validateAndPreviewBackup(JSON.stringify(backupFile), 'user-A');
+    restorationPreview.deletedConflicts[0].resolution = 'restore';
+    expect((await applyBackupRestoration(restorationPreview)).success).toBe(true);
 
     const afterRestored = await getLocalDNA('user-A');
     expect(afterRestored).toHaveLength(1);
@@ -283,9 +262,11 @@ describe('Backup and Restoration Service', () => {
 
     // Tentativa de restaurar o backup de Alice estando logado como Bob
     const preview = await validateAndPreviewBackup(JSON.stringify(backupFile), 'user-Bob');
-    expect(preview.valid).toBe(true);
+    expect(preview.valid).toBe(false);
     expect(preview.scopeMismatch).toBe(true);
     expect(preview.scopeMismatchWarning).toMatch(/Alice.*Bob/i);
+    expect((await applyBackupRestoration(preview)).success).toBe(false);
+    expect(await getLocalDNA('user-Bob')).toEqual([]);
   });
 
   it('8. reaplicação idêntica não gera escrita desnecessária', async () => {
