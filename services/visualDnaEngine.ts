@@ -32,6 +32,50 @@ const checkExactMatch = (text: string, queryWordsNormalized: string) => {
   return boundaryRegex.test(queryWordsNormalized);
 };
 
+// Strip only explicit, line-scoped analysis labels. Keep punctuation and line
+// boundaries until the existing intent parser has interpreted exclusions.
+const SEARCH_SECTION_LABELS = new Set([
+  'Linework', 'Traço', 'Linework / Traço', 'Rendering', 'Render', 'Rendering / Render',
+  'Palette', 'Paleta', 'Palette / Paleta', 'Silhouette', 'Silhueta', 'Silhouette / Silhueta',
+  'Pose & Motion', 'Camera / Framing', 'Composition', 'Lighting', 'Effects & Particles',
+  'Materials', 'Textures', 'Materials / Textures', 'Detail Density', 'Background', 'Hierarchy / Foco',
+  'Visual Motifs', 'Shape Language', 'Focal Anchors', 'Detail Placement', 'Composition Recipe',
+  'Palette Logic', 'Material Behavior', 'Energy Design', 'Style Anchors', 'Avoid Rules',
+].map(normalizeText));
+
+const prepareSearchQuery = (subject: string, cardType: string, archetype: string) => {
+  const lines = subject.split(/\r?\n/);
+  const hasSections = new Set(lines.map(normalizeText).filter(Boolean)).size > 1;
+  let avoidSection = false;
+  const sectionContent = (text: string) => avoidSection && text.trim() ? `Avoid ${text}` : text;
+  const content = lines.map(line => {
+    const unwrapped = line.trim().replace(/^(?:#{1,6}\s+|[-*]\s+)/, '');
+    const separator = /:|\s+[—–-]\s+/.exec(unwrapped);
+    const label = (separator ? unwrapped.slice(0, separator.index) : unwrapped)
+      .replace(/\*\*|__/g, '').trim();
+    const normalizedLabel = normalizeText(label.replace(/\s*\(advanced\)$/i, ''));
+    if (!SEARCH_SECTION_LABELS.has(normalizedLabel)) return sectionContent(line);
+    // A bare one-word search (even repeated on separate lines) is ambiguous,
+    // not an explicit section. Do not turn "linework" into an empty query.
+    if (!separator && !hasSections && !/^(?:#{1,6}\s|\*\*|__)/.test(line.trim())) return line;
+    // The Avoid Rules heading itself carries negation, even when its entries
+    // are plain nouns. Express that scope to the existing parser; never turn
+    // "Avoid Rules: armor" into an affirmative search for armor.
+    avoidSection = normalizedLabel === 'avoid rules';
+    return separator
+      ? sectionContent(unwrapped.slice(separator.index + separator[0].length).replace(/^(?:\*\*|__)\s*/, ''))
+      : '';
+  }).join('\n');
+  const { affirmativeText, excludedWords } = parsePromptIntent(content);
+  return {
+    // Keep phrase order *within* clauses, without manufacturing a tag across
+    // repeated sections. Only the per-field term set is deduplicated.
+    normalizedQuery: [affirmativeText, cardType, archetype]
+      .flatMap(text => text.split(/[,;.!?\r\n]+/)).map(normalizeText).filter(Boolean).join(' | '),
+    excludedWords,
+  };
+};
+
 export const scoreVisualDNAReferenceBase = (
   dna: VisualDNA,
   queryWordsNormalized: string,
@@ -184,13 +228,14 @@ export const scoreVisualDNAReferenceBase = (
     addMatch("CardType", "Trap Match", 2);
   }
 
+  const queryTerms = [...new Set(queryWordsNormalized.split(/\s+/))]
+    .filter(w => w.length > 3 && !isTermExcluded(w));
   const checkField = (fieldName: string, fieldVal: string | string[] | undefined, weight: number) => {
     if (!fieldVal) return;
     const strVal = Array.isArray(fieldVal) ? fieldVal.join(' ') : String(fieldVal);
-    const words = queryWordsNormalized.split(/\s+/).filter(w => w.length > 3 && !isTermExcluded(w));
     const normalizedField = normalizeText(strVal);
     let fieldScore = 0;
-    words.forEach(w => {
+    queryTerms.forEach(w => {
        const boundaryRegex = new RegExp("(^|\\s)" + escapeRegExp(w) + "($|\\s)", 'i');
        if (boundaryRegex.test(normalizedField)) {
            fieldScore += weight;
@@ -315,16 +360,20 @@ export const getAutomaticReferences = (
   maxReferences: number = 3,
   context?: Context | string
 ): VisualDNA[] => {
-  const { affirmativeText, excludedWords } = parsePromptIntent(subject);
-  const queryWords = [affirmativeText, cardType, archetype].filter(Boolean).join(" ");
-  const normalizedQuery = normalizeText(queryWords);
+  return scoreSearchReferences(subject, cardType, archetype, database, maxReferences, context)
+    .selected.map(item => item.dna);
+};
 
-  const scored = database.map(dna => {
-    return { dna, result: scoreVisualDNAReferenceBase(dna, normalizedQuery, cardType, excludedWords, context) };
-  }).filter(item => item.result.baseScore > 0);
-
-  const finalSelection = calculateComplementaryScores(scored, maxReferences);
-  return finalSelection.map(item => item.dna);
+const scoreSearchReferences = (
+  subject: string, cardType: string, archetype: string, database: VisualDNA[],
+  maxReferences: number, context?: Context | string
+) => {
+  const { normalizedQuery, excludedWords } = prepareSearchQuery(subject, cardType, archetype);
+  const scored = database.map(dna => ({
+    dna, result: scoreVisualDNAReferenceBase(dna, normalizedQuery, cardType, excludedWords, context)
+  }));
+  const selected = calculateComplementaryScores(scored.filter(s => s.result.baseScore > 0), maxReferences);
+  return { scored, selected };
 };
 
 export const getMatchingLogs = (
@@ -336,19 +385,10 @@ export const getMatchingLogs = (
   maxReferences: number = 3,
   context?: Context | string
 ): MatchingScoreLog[] => {
-  const { affirmativeText, excludedWords } = parsePromptIntent(subject);
-  const queryWords = [affirmativeText, cardType, archetype].filter(Boolean).join(" ");
-  const normalizedQuery = normalizeText(queryWords);
-  
-  const scored = database.map(dna => {
-    return { dna, result: scoreVisualDNAReferenceBase(dna, normalizedQuery, cardType, excludedWords, context) };
-  });
-  
-  // Use the exact maxReferences as generation
-  const scoredWithBonuses = calculateComplementaryScores([...scored].filter(s => s.result.baseScore > 0), maxReferences);
+  const { scored } = scoreSearchReferences(subject, cardType, archetype, database, maxReferences, context);
   
   return database.map(dna => {
-    const autoScoreResult = scoredWithBonuses.find(s => s.dna.id === dna.id)?.result || scored.find(s => s.dna.id === dna.id)!.result;
+    const autoScoreResult = scored.find(s => s.dna.id === dna.id)!.result;
     
     return {
       id: dna.id,
@@ -393,6 +433,48 @@ export interface SynthesizeParams {
   complexity?: Complexity | string;
   archetypePreset?: string;
 }
+
+type UtilityDimension = Exclude<keyof VisualDNA['scores'], 'detailDensity'>;
+
+// These cues choose a utility dimension, never admit content. Compatibility is
+// decided by the existing policy first. Mixed/unspecified techniques use style.
+const CONTRIBUTION_DIMENSIONS: [UtilityDimension, RegExp][] = [
+  ['lighting', /\b(?:lighting|rim light|bounce light|key light|backlight|backlighting|chiaroscuro)\b/],
+  ['composition', /\b(?:composition|framing|diagonal|rule of thirds|leading lines|depth layering|plane separation|subject background separation)\b/],
+  ['rendering', /\b(?:rendering|shading|shadows?|gradients?|linework|lineart|line art|outlines?|contours?|hatching|brushwork)\b/],
+  ['silhouette', /\b(?:silhouette|shape language)\b/],
+  ['palette', /\b(?:palette|color harmony|colour harmony|color temperature)\b/],
+  ['pose', /\b(?:pose|gesture|motion)\b/],
+  ['materials', /\b(?:material|materials|texture|textures|specular|reflection|reflections)\b/],
+  ['effects', /\b(?:effects|energy|particles)\b/],
+  ['details', /\b(?:detail|details|detailing|focal hierarchy)\b/],
+  ['background', /\b(?:background|atmospheric perspective)\b/],
+];
+
+const getContributionDimension = (text: string): UtilityDimension => {
+  const normalized = normalizeText(text);
+  const cues = CONTRIBUTION_DIMENSIONS.flatMap(([dimension, pattern]) =>
+    [...normalized.matchAll(new RegExp(pattern.source, 'g'))].map(match => ({
+      dimension, start: match.index, end: match.index + match[0].length,
+    })));
+  // A specific phrase owns its nested words: "subject background separation"
+  // is a composition cue, not independent composition AND background cues.
+  const dimensions = new Set(cues.filter(cue => !cues.some(other =>
+    other.start <= cue.start && other.end >= cue.end && other.end - other.start > cue.end - cue.start
+  )).map(cue => cue.dimension));
+  return dimensions.size === 1 ? [...dimensions][0] : 'style';
+};
+
+const contributionKey = (text: string): string => {
+  const normalized = normalizeText(text);
+  // Only bare formulations of clean contours are equivalent. Extra modifiers
+  // (tapered, variable weight, hard/soft, etc.) keep their full distinct text.
+  // Do not use token overlap: similar vocabulary can describe different work.
+  if (/^clean (?:outlines?|contours?(?: lines?)?|linework|line ?art)$/.test(normalized)) {
+    return 'clean contours';
+  }
+  return normalized;
+};
 
 export const synthesizeVisualDNA = (
   params: SynthesizeParams
@@ -562,198 +644,101 @@ export const synthesizeVisualDNA = (
     return false;
   };
 
-  // Evaluate Style Anchors and Prompt Fragments
-  const maxAnchors = intensity === "low" ? 2 : intensity === "medium" ? 4 : 6;
-  const acceptedAnchors: string[] = [];
-  const seenCleanAnchorTexts = new Set<string>();
-
-  for (const ref of references) {
-    const fragments: string[] = [];
-    if (Array.isArray(ref.stylePromptFragments)) fragments.push(...ref.stylePromptFragments);
-    if (typeof ref.styleAnchors === "string" && ref.styleAnchors.trim()) {
-      fragments.push(...ref.styleAnchors.split(/[,;]+/).map(s => s.trim()).filter(Boolean));
-    }
-
-    for (const frag of fragments) {
-      if (!frag || typeof frag !== "string" || !frag.trim()) continue;
-
-      const evalRes = evaluateCandidateFragment(frag, "styleAnchors", ref, synthesisContext);
-      const blockedList = evalRes.blockedIdentities || (evalRes.blockedIdentity ? [evalRes.blockedIdentity] : []);
-      for (const b of blockedList) {
-        if (!debugInfo.identityBlocked.includes(b)) {
-          debugInfo.identityBlocked.push(b);
+  // Budgeted lists collect and filter *all* candidates before sorting or
+  // spending slots. This preserves input/reference order as the final tie-break
+  // (including manual priority) without giving the first reference the budget.
+  const selectContributions = (
+    inputs: { ref: VisualDNA; text: string }[],
+    field: string,
+    label: string,
+    limit: number,
+    dimension?: UtilityDimension,
+    requirePromptMatch = false
+  ): string[] => {
+    const record = (ref: VisualDNA, raw: string, cleaned: string, decision: 'included' | 'discarded', reason: string) => {
+      debugInfo.evaluations!.push({
+        referenceId: ref.id, referenceName: ref.name || 'Unnamed', field,
+        text: raw, cleanedText: cleaned && cleaned !== raw ? cleaned : undefined,
+        decision, reason,
+      });
+      if (field === 'motifs') debugInfo.motifs.push({ motif: raw, used: decision === 'included', reason });
+      if (decision === 'included') contributingRefIds.add(ref.id);
+    };
+    const candidates = inputs.flatMap(({ ref, text }, order) => {
+      if (typeof text !== 'string' || !text.trim()) return [];
+      const evaluation = evaluateCandidateFragment(text, field, ref, synthesisContext);
+      for (const blocked of evaluation.blockedIdentities || (evaluation.blockedIdentity ? [evaluation.blockedIdentity] : [])) {
+        if (!debugInfo.identityBlocked.includes(blocked)) debugInfo.identityBlocked.push(blocked);
+      }
+      const raw = evaluation.originalText || text.trim();
+      const cleaned = evaluation.text;
+      let rejection = evaluation.decision !== 'included' || !cleaned ? evaluation.reason : '';
+      if (!rejection && requirePromptMatch) {
+        if (matchesPromptExclusion(text, excludedPhrases)) {
+          rejection = 'Contains user-excluded word.';
+        } else {
+          const relevant = normalizeText(cleaned).split(/\s+/).some(word => word.length > 2 &&
+            (checkExactMatch(word, userPromptNorm) || checkExactMatch(word, normalizeText(cardType))));
+          if (!relevant) rejection = 'Not relevant to current prompt context.';
         }
       }
+      if (rejection) {
+        record(ref, raw, cleaned, 'discarded', rejection);
+        return [];
+      }
+      const scoreKey = dimension || getContributionDimension(cleaned);
+      const rawScore = ref.scores?.[scoreKey];
+      const knownScore = typeof rawScore === 'number' && Number.isFinite(rawScore) && rawScore >= 0 && rawScore <= 1;
+      return [{ ref, raw, cleaned, order, scoreKey, knownScore,
+        utility: getEffectiveUtilityScore(ref, scoreKey), policyReason: evaluation.reason }];
+    });
 
-      if (evalRes.decision === "discarded" || !evalRes.text) {
-        debugInfo.evaluations!.push({
-          referenceId: ref.id,
-          referenceName: ref.name || "Unnamed",
-          field: "styleAnchors",
-          text: evalRes.originalText || frag.trim(),
-          decision: "discarded",
-          reason: evalRes.reason
-        });
+    candidates.sort((a, b) => b.utility - a.utility || a.order - b.order);
+    const seen = new Set<string>();
+    const accepted: string[] = [];
+    for (const candidate of candidates) {
+      const { ref, raw, cleaned, utility, scoreKey, knownScore, policyReason } = candidate;
+      if (limit === 0) {
+        record(ref, raw, cleaned, 'discarded', `Not consumed at the selected intensity (${label} limit is zero).`);
         continue;
       }
-
-      // Check duplicate AFTER cleaning
-      const normCleanText = normalizeText(evalRes.text);
-      if (seenCleanAnchorTexts.has(normCleanText)) {
-        debugInfo.evaluations!.push({
-          referenceId: ref.id,
-          referenceName: ref.name || "Unnamed",
-          field: "styleAnchors",
-          text: evalRes.originalText || frag.trim(),
-          cleanedText: evalRes.text !== frag.trim() ? evalRes.text : undefined,
-          decision: "discarded",
-          reason: "Duplicate style anchor after cleaning."
-        });
+      const key = contributionKey(cleaned);
+      if (seen.has(key)) {
+        record(ref, raw, cleaned, 'discarded', `Duplicate ${label} after cleaning; a higher-utility or earlier equal-utility candidate represents the same guidance.`);
         continue;
       }
-
-      // Check limit AFTER deduplication
-      if (acceptedAnchors.length < maxAnchors) {
-        seenCleanAnchorTexts.add(normCleanText);
-        acceptedAnchors.push(evalRes.text);
-        contributingRefIds.add(ref.id);
-        debugInfo.evaluations!.push({
-          referenceId: ref.id,
-          referenceName: ref.name || "Unnamed",
-          field: "styleAnchors",
-          text: evalRes.originalText || frag.trim(),
-          cleanedText: evalRes.text !== frag.trim() ? evalRes.text : undefined,
-          decision: "included",
-          reason: evalRes.reason
-        });
-      } else {
-        debugInfo.evaluations!.push({
-          referenceId: ref.id,
-          referenceName: ref.name || "Unnamed",
-          field: "styleAnchors",
-          text: evalRes.originalText || frag.trim(),
-          cleanedText: evalRes.text !== frag.trim() ? evalRes.text : undefined,
-          decision: "discarded",
-          reason: "Exceeds intensity limit for style anchors."
-        });
+      seen.add(key);
+      if (accepted.length >= limit) {
+        record(ref, raw, cleaned, 'discarded', `Exceeds intensity limit for ${label} after utility comparison.`);
+        continue;
       }
+      accepted.push(cleaned);
+      const utilityReason = knownScore
+        ? `Selected by ${scoreKey} utility (${utility}); equal utility preserves reference and fragment order.`
+        : `No valid ${scoreKey} score; conservative utility fallback 0, preserving reference and fragment order.`;
+      record(ref, raw, cleaned, 'included', `${policyReason} ${utilityReason}`);
     }
-  }
+    return accepted;
+  };
 
-  // Evaluate Motifs
-  const usedMotifs: string[] = [];
-  const seenCleanMotifTexts = new Set<string>();
-  const maxMotifs = intensity === "low" ? 0 : intensity === "medium" ? 3 : 5;
+  // Evaluate Style Anchors and Prompt Fragments
+  const maxAnchors = intensity === "low" ? 2 : intensity === "medium" ? 4 : 6;
+  const anchorInputs = references.flatMap(ref => {
+    const fragments: string[] = [];
+    if (Array.isArray(ref.stylePromptFragments)) fragments.push(...ref.stylePromptFragments);
+    if (typeof ref.styleAnchors === 'string') fragments.push(...ref.styleAnchors.split(/[,;]+/));
+    return fragments.map(text => ({ ref, text }));
+  });
+  const acceptedAnchors = selectContributions(anchorInputs, 'styleAnchors', 'style anchors', maxAnchors);
 
-  for (const ref of references) {
-    const rawMotifs: string[] = [];
-    if (Array.isArray(ref.contentMotifs)) rawMotifs.push(...ref.contentMotifs);
-    if (typeof ref.visualMotifs === "string" && ref.visualMotifs.trim()) {
-      rawMotifs.push(...ref.visualMotifs.split(/[,;]+/).map(s => s.trim()).filter(Boolean));
-    }
-
-    for (const motif of rawMotifs) {
-      if (!motif || typeof motif !== "string" || !motif.trim()) continue;
-      const normMotif = normalizeText(motif);
-
-      // Check if motif contains excluded words
-      const words = normMotif.split(/\s+/).filter(w => w.length > 2);
-      const isExcluded = matchesPromptExclusion(motif, excludedPhrases);
-      if (isExcluded) {
-        debugInfo.motifs.push({ motif, used: false, reason: "Contains user-excluded word." });
-        debugInfo.evaluations!.push({
-          referenceId: ref.id,
-          referenceName: ref.name || "Unnamed",
-          field: "motifs",
-          text: motif,
-          decision: "discarded",
-          reason: "Contains user-excluded word."
-        });
-        continue;
-      }
-
-      // Check prompt relevance
-      const isRelevant = words.some(w => {
-        const boundaryRegex = new RegExp("(^|\\s)" + escapeRegExp(w) + "($|\\s)", 'i');
-        return boundaryRegex.test(userPromptNorm) || boundaryRegex.test(normalizeText(affirmativeText)) || boundaryRegex.test(normalizeText(cardType));
-      });
-
-      if (!isRelevant) {
-        debugInfo.motifs.push({ motif, used: false, reason: "Not relevant to current prompt context." });
-        debugInfo.evaluations!.push({
-          referenceId: ref.id,
-          referenceName: ref.name || "Unnamed",
-          field: "motifs",
-          text: motif,
-          decision: "discarded",
-          reason: "Not relevant to current prompt context."
-        });
-        continue;
-      }
-
-      const evalRes = evaluateCandidateFragment(motif, "motifs", ref, synthesisContext);
-      const blockedList = evalRes.blockedIdentities || (evalRes.blockedIdentity ? [evalRes.blockedIdentity] : []);
-      for (const b of blockedList) {
-        if (!debugInfo.identityBlocked.includes(b)) debugInfo.identityBlocked.push(b);
-      }
-
-      if (evalRes.decision === "discarded" || !evalRes.text) {
-        debugInfo.motifs.push({ motif, used: false, reason: evalRes.reason });
-        debugInfo.evaluations!.push({
-          referenceId: ref.id,
-          referenceName: ref.name || "Unnamed",
-          field: "motifs",
-          text: evalRes.originalText || motif.trim(),
-          decision: "discarded",
-          reason: evalRes.reason
-        });
-        continue;
-      }
-
-      // Check duplicate after cleaning
-      const normCleanMotif = normalizeText(evalRes.text);
-      if (seenCleanMotifTexts.has(normCleanMotif)) {
-        debugInfo.motifs.push({ motif, used: false, reason: "Duplicate motif after cleaning." });
-        debugInfo.evaluations!.push({
-          referenceId: ref.id,
-          referenceName: ref.name || "Unnamed",
-          field: "motifs",
-          text: evalRes.originalText || motif.trim(),
-          cleanedText: evalRes.text !== motif.trim() ? evalRes.text : undefined,
-          decision: "discarded",
-          reason: "Duplicate motif after cleaning."
-        });
-        continue;
-      }
-
-      if (usedMotifs.length < maxMotifs) {
-        seenCleanMotifTexts.add(normCleanMotif);
-        usedMotifs.push(evalRes.text);
-        contributingRefIds.add(ref.id);
-        debugInfo.motifs.push({ motif, used: true, reason: "Matches user prompt context." });
-        debugInfo.evaluations!.push({
-          referenceId: ref.id,
-          referenceName: ref.name || "Unnamed",
-          field: "motifs",
-          text: evalRes.originalText || motif.trim(),
-          cleanedText: evalRes.text !== motif.trim() ? evalRes.text : undefined,
-          decision: "included",
-          reason: evalRes.reason
-        });
-      } else {
-        debugInfo.motifs.push({ motif, used: false, reason: "Exceeds intensity limit for motifs." });
-        debugInfo.evaluations!.push({
-          referenceId: ref.id,
-          referenceName: ref.name || "Unnamed",
-          field: "motifs",
-          text: evalRes.originalText || motif.trim(),
-          cleanedText: evalRes.text !== motif.trim() ? evalRes.text : undefined,
-          decision: "discarded",
-          reason: "Exceeds intensity limit for motifs."
-        });
-      }
-    }
-  }
+  const maxMotifs = intensity === 'low' ? 0 : intensity === 'medium' ? 3 : 5;
+  const motifInputs = references.flatMap(ref => {
+    const motifs: string[] = [];
+    if (Array.isArray(ref.contentMotifs)) motifs.push(...ref.contentMotifs);
+    if (typeof ref.visualMotifs === 'string') motifs.push(...ref.visualMotifs.split(/[,;]+/));
+    return motifs.map(text => ({ ref, text }));
+  });
+  const usedMotifs = selectContributions(motifInputs, 'motifs', 'motifs', maxMotifs, undefined, true);
 
   // Semantic slot resolutions based on intensity
   const rendering = getBestSlot("rendering", ["linework"], "rendering");
@@ -819,147 +804,15 @@ export const synthesizeVisualDNA = (
     }
 
     // Substance Profile: materials & elements
-    const maxMat = intensity === "medium" ? 2 : 4;
-    const validMats: string[] = [];
-    const seenCleanMats = new Set<string>();
-
-    for (const ref of references) {
-      if (ref.substanceProfile && ref.substanceProfile.confidence >= 0.5) {
-        const rawMats = ref.substanceProfile.materials || [];
-        for (const rawMat of rawMats) {
-          if (!rawMat || typeof rawMat !== "string" || !rawMat.trim()) continue;
-
-          const evalRes = evaluateCandidateFragment(rawMat, "substanceMaterials", ref, synthesisContext);
-          const blockedList = evalRes.blockedIdentities || (evalRes.blockedIdentity ? [evalRes.blockedIdentity] : []);
-          for (const b of blockedList) {
-            if (!debugInfo.identityBlocked.includes(b)) debugInfo.identityBlocked.push(b);
-          }
-
-          if (evalRes.decision !== "included" || !evalRes.text) {
-            debugInfo.evaluations!.push({
-              referenceId: ref.id,
-              referenceName: ref.name || "Unnamed",
-              field: "substanceMaterials",
-              text: evalRes.originalText || rawMat.trim(),
-              decision: "discarded",
-              reason: evalRes.reason
-            });
-            continue;
-          }
-
-          // Check duplicate AFTER cleaning
-          const normCleanMat = normalizeText(evalRes.text);
-          if (seenCleanMats.has(normCleanMat)) {
-            debugInfo.evaluations!.push({
-              referenceId: ref.id,
-              referenceName: ref.name || "Unnamed",
-              field: "substanceMaterials",
-              text: evalRes.originalText || rawMat.trim(),
-              cleanedText: evalRes.text !== rawMat.trim() ? evalRes.text : undefined,
-              decision: "discarded",
-              reason: "Duplicate substance material after cleaning."
-            });
-            continue;
-          }
-
-          if (validMats.length < maxMat) {
-            seenCleanMats.add(normCleanMat);
-            validMats.push(evalRes.text);
-            contributingRefIds.add(ref.id);
-            debugInfo.evaluations!.push({
-              referenceId: ref.id,
-              referenceName: ref.name || "Unnamed",
-              field: "substanceMaterials",
-              text: evalRes.originalText || rawMat.trim(),
-              cleanedText: evalRes.text !== rawMat.trim() ? evalRes.text : undefined,
-              decision: "included",
-              reason: evalRes.reason
-            });
-          } else {
-            debugInfo.evaluations!.push({
-              referenceId: ref.id,
-              referenceName: ref.name || "Unnamed",
-              field: "substanceMaterials",
-              text: evalRes.originalText || rawMat.trim(),
-              cleanedText: evalRes.text !== rawMat.trim() ? evalRes.text : undefined,
-              decision: "discarded",
-              reason: "Exceeds intensity limit for substance materials."
-            });
-          }
-        }
-      }
-    }
-
-    const validElements: string[] = [];
-    const seenCleanElements = new Set<string>();
+    const maxMat = intensity === 'medium' ? 2 : 4;
     const maxElements = 2;
-
-    for (const ref of references) {
-      if (ref.substanceProfile && ref.substanceProfile.confidence >= 0.5) {
-        const rawElements = ref.substanceProfile.elements || [];
-        for (const rawEl of rawElements) {
-          if (!rawEl || typeof rawEl !== "string" || !rawEl.trim()) continue;
-
-          const evalRes = evaluateCandidateFragment(rawEl, "substanceElements", ref, synthesisContext);
-          const blockedList = evalRes.blockedIdentities || (evalRes.blockedIdentity ? [evalRes.blockedIdentity] : []);
-          for (const b of blockedList) {
-            if (!debugInfo.identityBlocked.includes(b)) debugInfo.identityBlocked.push(b);
-          }
-
-          if (evalRes.decision !== "included" || !evalRes.text) {
-            debugInfo.evaluations!.push({
-              referenceId: ref.id,
-              referenceName: ref.name || "Unnamed",
-              field: "substanceElements",
-              text: evalRes.originalText || rawEl.trim(),
-              decision: "discarded",
-              reason: evalRes.reason
-            });
-            continue;
-          }
-
-          // Check duplicate AFTER cleaning
-          const normCleanElement = normalizeText(evalRes.text);
-          if (seenCleanElements.has(normCleanElement)) {
-            debugInfo.evaluations!.push({
-              referenceId: ref.id,
-              referenceName: ref.name || "Unnamed",
-              field: "substanceElements",
-              text: evalRes.originalText || rawEl.trim(),
-              cleanedText: evalRes.text !== rawEl.trim() ? evalRes.text : undefined,
-              decision: "discarded",
-              reason: "Duplicate substance element after cleaning."
-            });
-            continue;
-          }
-
-          if (validElements.length < maxElements) {
-            seenCleanElements.add(normCleanElement);
-            validElements.push(evalRes.text);
-            contributingRefIds.add(ref.id);
-            debugInfo.evaluations!.push({
-              referenceId: ref.id,
-              referenceName: ref.name || "Unnamed",
-              field: "substanceElements",
-              text: evalRes.originalText || rawEl.trim(),
-              cleanedText: evalRes.text !== rawEl.trim() ? evalRes.text : undefined,
-              decision: "included",
-              reason: evalRes.reason
-            });
-          } else {
-            debugInfo.evaluations!.push({
-              referenceId: ref.id,
-              referenceName: ref.name || "Unnamed",
-              field: "substanceElements",
-              text: evalRes.originalText || rawEl.trim(),
-              cleanedText: evalRes.text !== rawEl.trim() ? evalRes.text : undefined,
-              decision: "discarded",
-              reason: "Exceeds limit for substance elements."
-            });
-          }
-        }
-      }
-    }
+    const substanceInputs = (field: 'materials' | 'elements') => references.flatMap(ref => {
+      const profile = ref.substanceProfile;
+      if (!profile || !(profile.confidence >= 0.5)) return [];
+      return (profile[field] || []).map(text => ({ ref, text }));
+    });
+    const validMats = selectContributions(substanceInputs('materials'), 'substanceMaterials', 'substance materials', maxMat, 'materials');
+    const validElements = selectContributions(substanceInputs('elements'), 'substanceElements', 'substance elements', maxElements, 'effects');
 
     if (validMats.length > 0 || validElements.length > 0) {
       substanceProfileStr = [
