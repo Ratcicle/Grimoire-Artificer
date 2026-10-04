@@ -21,6 +21,14 @@ export interface DnaTombstone {
 let dbInstance: IDBDatabase | null = null;
 let opening: Promise<IDBDatabase> | null = null;
 
+export const closeLocalDatabase = (): void => {
+  if (dbInstance) {
+    dbInstance.close();
+    dbInstance = null;
+    opening = null;
+  }
+};
+
 export const initDB = (): Promise<IDBDatabase> => {
   if (dbInstance) return Promise.resolve(dbInstance);
   if (opening) return opening;

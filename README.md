@@ -48,6 +48,7 @@ O monitor exibe `-` quando a API não forneceu uma contagem e `0` quando informo
 
 Se uma resposta HTTP se perder, a tentativa fica com consumo desconhecido. Falha ao salvar telemetria não dispara novamente a IA nem transforma o resultado principal em falha.
 
-## Auditoria
+## Auditoria e Homologação
 
-Consulte [checklist](docs/audit/Grimoire-Checklist-Codex.md), [plano/baseline](docs/audit/IMPLEMENTATION.md) e [entrega técnica](docs/audit/DELIVERY.md).
+- Consulte o [Roteiro de Homologação no AI Studio](docs/HOMOLOGACAO_AI_STUDIO.md) para validar o modo de acesso padrão, seleção de chave pessoal e backup/restauração local de referências.
+- Consulte [checklist](docs/audit/Grimoire-Checklist-Codex.md), [plano/baseline](docs/audit/IMPLEMENTATION.md) e [entrega técnica](docs/audit/DELIVERY.md).

@@ -6,8 +6,16 @@ import App from './App';
 const m=vi.hoisted(()=>({generate:vi.fn(),log:vi.fn(),submit:null as any}));
 vi.mock('./services/geminiService',()=>({
  checkApiKey:async()=>true,promptApiKeySelection:vi.fn(),disconnectApiKey:vi.fn(),
+ resolveAccessPolicy:async()=>({mode:'local_server',label:'Servidor local configurado',hasPersonalKey:true}),
+ validateModelAccess:()=>({allowed:true}),
  generateCardArt:(r:any,started?:()=>void)=>{started?.();return m.generate(r);},
  mapUsageMetadata:(u:any)=>({totalTokenCount:u?.totalTokenCount}),extractUsageFromError:(e:any)=>e?.usageMetadata
+}));
+vi.mock('./services/accessPolicy',()=>({
+ resolveAccessPolicy:async()=>({mode:'local_server',label:'Servidor local configurado',hasPersonalKey:true}),
+ validateModelAccess:()=>({allowed:true}),
+ setAccessModeForTesting:vi.fn(),
+ hasHostRuntimeCredential:()=>false
 }));
 vi.mock('./services/localDbService',()=>({saveTokenLog:m.log}));
 vi.mock('./services/cloudDnaService',()=>({saveDNA:vi.fn()}));

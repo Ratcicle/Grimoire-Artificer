@@ -1,5 +1,6 @@
 import { CardGenerationRequest, TokenUsageLog, VisualDNA } from '../types';
 import { generateCardArt, analyzeReferenceImage, extractUsageFromError, mapUsageMetadata } from './geminiService';
+import { resolveAccessPolicy, validateModelAccess } from './accessPolicy';
 import { getLocalDNA, saveTokenLog } from './localDbService';
 import { saveDNA } from './cloudDnaService';
 import { captureDnaOperationContext, assertDnaOperationContext, type DnaOperationContext } from './dnaAccountContext';
@@ -25,7 +26,13 @@ export async function runGeneration(request: CardGenerationRequest): Promise<Bus
   const start = Date.now();
   let called = false, success = false, usage: unknown, errorMessage: string | undefined;
   try {
-    const result = await generateCardArt(request, (attempted = true) => {called = attempted;});
+    const policy = await resolveAccessPolicy();
+    const accessCheck = validateModelAccess(policy.mode, request.model);
+    if (!accessCheck.allowed) {
+      throw new Error(accessCheck.reason || 'Modelo não permitido para a política de acesso atual.');
+    }
+    const lockedMode = policy.mode;
+    const result = await generateCardArt(request, (attempted = true) => {called = attempted;}, lockedMode);
     usage = result.usageMetadata;
     success = true;
     return {status:'done', result};
@@ -60,7 +67,14 @@ export async function runReferenceAnalysis(request: ReferenceAnalysisRequest): P
     isReanalysis ||= !!existing;
     if (request.reanalyze && !existing) return {status:'deleted'};
     const snapshot: VisualDNA | null = existing ? structuredClone(existing) : null;
-    const result = await analyzeReferenceImage(snapshot?.imageUrl || request.imageUrl, snapshot?.name || request.name, request.model, (attempted = true) => {called=attempted;});
+    let lockedMode: any;
+    try {
+      const policy = await resolveAccessPolicy();
+      lockedMode = policy.mode;
+    } catch {
+      // ignore
+    }
+    const result = await analyzeReferenceImage(snapshot?.imageUrl || request.imageUrl, snapshot?.name || request.name, request.model, (attempted = true) => {called=attempted;}, lockedMode);
     usage = result.usageMetadata;
     assertDnaOperationContext(context);
     const current = (await getLocalDNA(context.ownerId)).find(d => d.id === request.id);

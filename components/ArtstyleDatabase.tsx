@@ -18,9 +18,16 @@ import { subscribeDnaChanges, captureDnaOperationContext, isDnaOperationContextC
 import { compressImage } from "../services/imageUtils";
 import { auth, provider, signInWithPopup, signOut, onAuthStateChanged, User } from "../services/firebase";
 import { 
+  exportLibraryBackup, 
+  validateAndPreviewBackup, 
+  applyBackupRestoration, 
+  type BackupPreviewResult 
+} from "../services/backupService";
+import { 
   Database, Upload, Trash2, Edit2, Search, RefreshCw, BarChart3, Tag, 
   FileText, Check, AlertCircle, Sparkles, Sliders, ChevronDown, ChevronUp, 
-  Image as ImageIcon, CheckCircle2, Eye, EyeOff, Save, X, Plus, Cloud, LogOut
+  Image as ImageIcon, CheckCircle2, Eye, EyeOff, Save, X, Plus, Cloud, LogOut,
+  Download, AlertTriangle
 } from "lucide-react";
 
 interface ArtstyleDatabaseProps {
@@ -78,6 +85,13 @@ const ArtstyleDatabase: React.FC<ArtstyleDatabaseProps> = ({ onBackToGrimoire })
   const [cloudSyncEnabled, setCloudSyncEnabledState] = useState<boolean>(isCloudSyncEnabled());
   const [syncStatusMsg, setSyncStatusMsg] = useState<string>("");
   const [lastSyncTime, setLastSyncTime] = useState<number>(getLastSyncAt());
+
+  // Local Backup and Restoration States
+  const [showRestoreModal, setShowRestoreModal] = useState<boolean>(false);
+  const [restorePreview, setRestorePreview] = useState<BackupPreviewResult | null>(null);
+  const [restoreError, setRestoreError] = useState<string | null>(null);
+  const [applyingRestore, setApplyingRestore] = useState<boolean>(false);
+  const restoreFileInputRef = useRef<HTMLInputElement>(null);
 
   const preparingFiles = useRef(false);
   const [preparing, setPreparing] = useState(false);
@@ -207,6 +221,105 @@ const ArtstyleDatabase: React.FC<ArtstyleDatabaseProps> = ({ onBackToGrimoire })
       setDuplicateWarning(result.errors);
     } catch (error) {setSyncStatusMsg(error instanceof Error ? error.message : 'Falha ao preparar arquivos.');}
     finally {preparingFiles.current=false;setPreparing(false);if(fileInputRef.current)fileInputRef.current.value='';}
+  };
+
+  const handleExportBackup = async (targetScope: 'current' | 'legacy') => {
+    try {
+      const scopeOwnerId = targetScope === 'legacy' ? null : (user ? user.uid : null);
+      const backup = await exportLibraryBackup(scopeOwnerId);
+      const jsonText = JSON.stringify(backup, null, 2);
+      const blob = new Blob([jsonText], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const downloadAnchor = document.createElement('a');
+      downloadAnchor.href = url;
+      const scopeLabel = scopeOwnerId === null ? 'legado' : `conta-${scopeOwnerId.slice(0, 8)}`;
+      downloadAnchor.download = `grimoire-artstyle-backup-${scopeLabel}-${Date.now()}.json`;
+      document.body.appendChild(downloadAnchor);
+      downloadAnchor.click();
+      document.body.removeChild(downloadAnchor);
+      URL.revokeObjectURL(url);
+      setSyncStatusMsg(`Backup exportado: ${backup.records.length} referências salvas.`);
+    } catch (err: any) {
+      setSyncStatusMsg(`Falha ao exportar backup: ${err.message}`);
+    }
+  };
+
+  const handleSelectRestoreFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setRestoreError(null);
+    try {
+      const text = await file.text();
+      const currentTargetOwner = user ? user.uid : null;
+      const preview = await validateAndPreviewBackup(text, currentTargetOwner);
+      if (!preview.valid) {
+        setRestoreError(preview.error || 'Arquivo de backup inválido.');
+        setSyncStatusMsg(`Erro no backup: ${preview.error}`);
+        return;
+      }
+      setRestorePreview(preview);
+      setShowRestoreModal(true);
+    } catch (err: any) {
+      setRestoreError(err.message || 'Falha ao processar arquivo de backup.');
+      setSyncStatusMsg(`Falha no backup: ${err.message}`);
+    } finally {
+      if (restoreFileInputRef.current) restoreFileInputRef.current.value = '';
+    }
+  };
+
+  const handleToggleConflictResolution = (conflictId: string) => {
+    if (!restorePreview) return;
+    setRestorePreview({
+      ...restorePreview,
+      conflicts: restorePreview.conflicts.map(c => 
+        c.id === conflictId ? { ...c, resolution: c.resolution === 'keep_current' ? 'replace' : 'keep_current' } : c
+      )
+    });
+  };
+
+  const handleToggleDeletedResolution = (deletedId: string) => {
+    if (!restorePreview) return;
+    setRestorePreview({
+      ...restorePreview,
+      deletedConflicts: restorePreview.deletedConflicts.map(d =>
+        d.id === deletedId ? { ...d, resolution: d.resolution === 'keep_deleted' ? 'restore' : 'keep_deleted' } : d
+      )
+    });
+  };
+
+  const handleApplyRestore = async () => {
+    if (!restorePreview) return;
+    setApplyingRestore(true);
+    try {
+      const targetOwnerId = user ? user.uid : null;
+      const conflictsToReplace = restorePreview.conflicts
+        .filter(c => c.resolution === 'replace')
+        .map(c => ({ current: c.current, replacement: c.incoming }));
+      const deletedToRestore = restorePreview.deletedConflicts
+        .filter(d => d.resolution === 'restore')
+        .map(d => d.incoming);
+
+      const result = await applyBackupRestoration({
+        targetOwnerId,
+        newRecords: restorePreview.newRecords,
+        conflictsToReplace,
+        deletedToRestore
+      });
+
+      if (!result.success) {
+        throw new Error(result.error || 'Falha ao aplicar restauração.');
+      }
+
+      const refreshed = await getLocalDNA(targetOwnerId);
+      setDnaList(refreshed);
+      setShowRestoreModal(false);
+      setRestorePreview(null);
+      setSyncStatusMsg(`Restauração concluída! ${result.appliedCount} registros atualizados (${result.addedCount} novos, ${result.replacedCount} substituídos, ${result.restoredCount} ressuscitados).`);
+    } catch (err: any) {
+      setRestoreError(err.message || 'Erro durante a restauração.');
+    } finally {
+      setApplyingRestore(false);
+    }
   };
 
   useEffect(() => subscribeDnaChanges(() => { void loadDatabase(); }), []);
@@ -586,6 +699,36 @@ const ArtstyleDatabase: React.FC<ArtstyleDatabaseProps> = ({ onBackToGrimoire })
                 <Sparkles size={13} className="text-amber-500 shrink-0" />
                 Forge Cards
               </button>
+              <div className="grid grid-cols-2 gap-1.5 pt-1 border-t border-stone-850/60">
+                <button
+                  type="button"
+                  onClick={() => handleExportBackup('current')}
+                  title="Exportar biblioteca local em JSON"
+                  className="flex items-center justify-center gap-1.5 h-8 px-2 bg-stone-900 hover:bg-stone-850 text-stone-300 hover:text-white border border-stone-800 text-[9px] font-bold uppercase tracking-wider rounded-lg transition-all cursor-pointer"
+                >
+                  <Download size={12} className="text-amber-500 shrink-0" />
+                  <span>Exportar</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => restoreFileInputRef.current?.click()}
+                  title="Restaurar backup com prévia e validação"
+                  className="flex items-center justify-center gap-1.5 h-8 px-2 bg-stone-900 hover:bg-stone-850 text-stone-300 hover:text-white border border-stone-800 text-[9px] font-bold uppercase tracking-wider rounded-lg transition-all cursor-pointer"
+                >
+                  <Upload size={12} className="text-amber-500 shrink-0" />
+                  <span>Restaurar</span>
+                </button>
+              </div>
+              {user && (
+                <button
+                  type="button"
+                  onClick={() => handleExportBackup('legacy')}
+                  title="Exportar acervo legado sem conta associada"
+                  className="text-[8px] text-stone-500 hover:text-stone-300 uppercase tracking-widest text-center py-0.5 hover:underline cursor-pointer"
+                >
+                  Exportar acervo legado
+                </button>
+              )}
               <input
                 type="file"
                 ref={fileInputRef}
@@ -593,6 +736,13 @@ const ArtstyleDatabase: React.FC<ArtstyleDatabaseProps> = ({ onBackToGrimoire })
                 disabled={preparing}
                 multiple
                 accept="image/*"
+                className="hidden"
+              />
+              <input
+                type="file"
+                ref={restoreFileInputRef}
+                onChange={handleSelectRestoreFile}
+                accept=".json,application/json"
                 className="hidden"
               />
             </div>
@@ -1419,6 +1569,189 @@ const ArtstyleDatabase: React.FC<ArtstyleDatabaseProps> = ({ onBackToGrimoire })
           </div>
         )}
       </div>
+
+      {/* Modal de Restauração com Prévia e Confirmação Explícita */}
+      {showRestoreModal && restorePreview && (
+        <div className="fixed inset-0 bg-stone-950/85 backdrop-blur-md z-50 flex items-center justify-center p-4">
+          <div className="bg-stone-900 border border-stone-800 rounded-2xl w-full max-w-2xl max-h-[85vh] flex flex-col shadow-2xl overflow-hidden animate-fade-in">
+            {/* Header */}
+            <div className="p-5 border-b border-stone-800 flex justify-between items-center bg-stone-950/60">
+              <div className="flex items-center gap-2">
+                <FileText size={18} className="text-amber-500" />
+                <div>
+                  <h3 className="text-sm font-bold uppercase tracking-wider text-stone-200">
+                    Prévia de Restauração de Referências
+                  </h3>
+                  <p className="text-[10px] text-stone-400">
+                    {restorePreview.fileScope?.description} • {restorePreview.summary.totalIncoming} referências no arquivo
+                  </p>
+                </div>
+              </div>
+              <button 
+                onClick={() => { setShowRestoreModal(false); setRestorePreview(null); }}
+                className="p-1 text-stone-400 hover:text-white rounded hover:bg-stone-800 transition-colors cursor-pointer"
+              >
+                <X size={16} />
+              </button>
+            </div>
+
+            {/* Content scroll */}
+            <div className="p-5 overflow-y-auto space-y-4 flex-1 scrollbar-thin text-xs text-stone-300">
+              {/* Scope warning */}
+              {restorePreview.scopeMismatch && (
+                <div className="bg-amber-950/30 border border-amber-800/60 p-3 rounded-xl flex items-start gap-2.5 text-amber-200">
+                  <AlertTriangle size={16} className="text-amber-400 shrink-0 mt-0.5" />
+                  <div className="text-[11px] leading-relaxed">
+                    <p className="font-bold">Aviso de Escopo:</p>
+                    <p>{restorePreview.scopeMismatchWarning}</p>
+                    <p className="mt-1 text-[10px] text-amber-400/80">
+                      A restauração aplicará os registros no seu escopo atual ({user ? 'Conta: ' + user.uid : 'Acervo local sem conta'}).
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              {/* Summary Stats */}
+              <div className="grid grid-cols-4 gap-2 text-center">
+                <div className="bg-stone-950/60 p-2.5 rounded-lg border border-stone-850">
+                  <span className="text-[9px] text-stone-500 uppercase font-bold block">Novos</span>
+                  <span className="text-base font-bold text-green-400">{restorePreview.summary.newCount}</span>
+                </div>
+                <div className="bg-stone-950/60 p-2.5 rounded-lg border border-stone-850">
+                  <span className="text-[9px] text-stone-500 uppercase font-bold block">Idênticos</span>
+                  <span className="text-base font-bold text-stone-400">{restorePreview.summary.identicalCount}</span>
+                </div>
+                <div className="bg-stone-950/60 p-2.5 rounded-lg border border-stone-850">
+                  <span className="text-[9px] text-stone-500 uppercase font-bold block">Conflitos</span>
+                  <span className="text-base font-bold text-amber-400">{restorePreview.summary.conflictCount}</span>
+                </div>
+                <div className="bg-stone-950/60 p-2.5 rounded-lg border border-stone-850">
+                  <span className="text-[9px] text-stone-500 uppercase font-bold block">Excluídos</span>
+                  <span className="text-base font-bold text-red-400">{restorePreview.summary.deletedConflictCount}</span>
+                </div>
+              </div>
+
+              {/* New Records Section */}
+              {restorePreview.newRecords.length > 0 && (
+                <div className="bg-stone-950/40 p-3 rounded-xl border border-stone-850 space-y-2">
+                  <h4 className="text-[10px] font-bold uppercase tracking-wider text-green-400 flex items-center gap-1.5">
+                    <CheckCircle2 size={12} /> {restorePreview.newRecords.length} Referências Novas (serão adicionadas)
+                  </h4>
+                  <div className="flex flex-wrap gap-1.5 max-h-24 overflow-y-auto scrollbar-thin">
+                    {restorePreview.newRecords.map(r => (
+                      <span key={r.id} className="px-2 py-0.5 bg-stone-900 border border-stone-800 rounded text-[10px] text-stone-300">
+                        {r.name}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Conflicts Section */}
+              {restorePreview.conflicts.length > 0 && (
+                <div className="bg-stone-950/40 p-3 rounded-xl border border-amber-900/30 space-y-2.5">
+                  <div className="flex justify-between items-center">
+                    <h4 className="text-[10px] font-bold uppercase tracking-wider text-amber-400 flex items-center gap-1.5">
+                      <AlertTriangle size={12} /> {restorePreview.conflicts.length} Conflitos (mesmo ID com conteúdo diferente)
+                    </h4>
+                    <span className="text-[9px] text-stone-500 italic">Padrão: Manter atual</span>
+                  </div>
+                  <div className="space-y-2 max-h-48 overflow-y-auto scrollbar-thin pr-1">
+                    {restorePreview.conflicts.map(c => (
+                      <div key={c.id} className="p-2.5 bg-stone-900/80 rounded-lg border border-stone-800 flex justify-between items-center gap-3">
+                        <div className="overflow-hidden">
+                          <p className="font-bold text-stone-200 truncate">{c.name}</p>
+                          <p className="text-[9px] text-stone-500 truncate">ID: {c.id}</p>
+                        </div>
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          <button
+                            type="button"
+                            onClick={() => handleToggleConflictResolution(c.id)}
+                            className={`px-2.5 py-1 rounded text-[9px] font-bold uppercase transition-all cursor-pointer ${
+                              c.resolution === 'replace'
+                                ? 'bg-amber-600 text-white'
+                                : 'bg-stone-800 text-stone-400 hover:text-stone-200'
+                            }`}
+                          >
+                            {c.resolution === 'replace' ? 'Substituir' : 'Manter Atual'}
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Previously Deleted Records Section */}
+              {restorePreview.deletedConflicts.length > 0 && (
+                <div className="bg-stone-950/40 p-3 rounded-xl border border-red-900/30 space-y-2.5">
+                  <div className="flex justify-between items-center">
+                    <h4 className="text-[10px] font-bold uppercase tracking-wider text-red-400 flex items-center gap-1.5">
+                      <Trash2 size={12} /> {restorePreview.deletedConflicts.length} Registros Anteriormente Excluídos
+                    </h4>
+                    <span className="text-[9px] text-stone-500 italic">Padrão: Manter excluído</span>
+                  </div>
+                  <div className="space-y-2 max-h-36 overflow-y-auto scrollbar-thin pr-1">
+                    {restorePreview.deletedConflicts.map(d => (
+                      <div key={d.id} className="p-2.5 bg-stone-900/80 rounded-lg border border-stone-800 flex justify-between items-center gap-3">
+                        <div className="overflow-hidden">
+                          <p className="font-bold text-stone-200 truncate">{d.name}</p>
+                          <p className="text-[9px] text-stone-500">Excluído em: {new Date(d.deletedAt).toLocaleDateString()}</p>
+                        </div>
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          <button
+                            type="button"
+                            onClick={() => handleToggleDeletedResolution(d.id)}
+                            className={`px-2.5 py-1 rounded text-[9px] font-bold uppercase transition-all cursor-pointer ${
+                              d.resolution === 'restore'
+                                ? 'bg-green-600 text-white'
+                                : 'bg-stone-800 text-stone-400 hover:text-stone-200'
+                            }`}
+                          >
+                            {d.resolution === 'restore' ? 'Ressuscitar' : 'Manter Excluído'}
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {restoreError && (
+                <div className="bg-red-950/40 border border-red-800 p-2.5 rounded-lg text-red-300 text-[10px]">
+                  {restoreError}
+                </div>
+              )}
+            </div>
+
+            {/* Footer Buttons */}
+            <div className="p-4 border-t border-stone-800 bg-stone-950/80 flex justify-between items-center">
+              <span className="text-[10px] text-stone-500">
+                Operação 100% local. Não altera o Firestore.
+              </span>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => { setShowRestoreModal(false); setRestorePreview(null); }}
+                  disabled={applyingRestore}
+                  className="px-4 py-2 bg-stone-800 hover:bg-stone-700 text-stone-300 text-[10px] font-bold uppercase tracking-wider rounded-lg transition-all cursor-pointer"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="button"
+                  onClick={handleApplyRestore}
+                  disabled={applyingRestore}
+                  className="px-4 py-2 bg-amber-600 hover:bg-amber-500 text-white text-[10px] font-bold uppercase tracking-wider rounded-lg transition-all shadow-md shadow-amber-950/30 flex items-center gap-1.5 cursor-pointer"
+                >
+                  {applyingRestore ? <RefreshCw size={12} className="animate-spin" /> : <Save size={12} />}
+                  <span>{applyingRestore ? 'Aplicando...' : 'Confirmar Restauração'}</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
     </div>
   );

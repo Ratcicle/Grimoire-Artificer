@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { CardGenerationRequest, GeneratedCard } from './types';
-import { checkApiKey, promptApiKeySelection, disconnectApiKey } from './services/geminiService';
+import { checkApiKey, promptApiKeySelection, disconnectApiKey, resolveAccessPolicy, validateModelAccess, type AccessPolicyState } from './services/geminiService';
 import { imageExtension } from './services/imagePreparation';
 import { runGeneration } from './services/aiOperations';
 import CardForm from './components/CardForm';
@@ -10,6 +10,11 @@ const TokenMonitor = React.lazy(() => import('./components/TokenMonitor'));
 import { History, Plus, AlertCircle, Download, Key, Sparkles, Database, BarChart3 } from 'lucide-react';
 
 const App: React.FC = () => {
+  const [accessPolicy, setAccessPolicy] = useState<AccessPolicyState>({
+    mode: 'unavailable',
+    label: 'Acesso indisponível',
+    hasPersonalKey: false
+  });
   const [apiKeySet, setApiKeySet] = useState<boolean>(false);
   const [checkingKey, setCheckingKey] = useState<boolean>(true);
   const [showKeyDropdown, setShowKeyDropdown] = useState<boolean>(false);
@@ -26,10 +31,17 @@ const App: React.FC = () => {
   const verifyKey = async () => {
     setCheckingKey(true);
     try {
-      const hasKey = await checkApiKey();
-      setApiKeySet(hasKey);
+      const policy = typeof resolveAccessPolicy === 'function'
+        ? await resolveAccessPolicy()
+        : {
+            mode: (await checkApiKey()) ? 'local_server' : 'unavailable',
+            label: (await checkApiKey()) ? 'Servidor local configurado' : 'Acesso indisponível',
+            hasPersonalKey: await checkApiKey(),
+          };
+      setAccessPolicy(policy);
+      setApiKeySet(policy.hasPersonalKey || policy.mode === 'local_server');
     } catch (e) {
-      console.error("Failed to check API key", e);
+      console.error("Failed to check access policy", e);
     } finally {
       setCheckingKey(false);
     }
@@ -38,8 +50,7 @@ const App: React.FC = () => {
   const handleConnect = async () => {
     try {
       await promptApiKeySelection();
-      const hasKey = await checkApiKey();
-      setApiKeySet(hasKey); 
+      await verifyKey();
       setError(null);
     } catch (e) {
       console.error(e);
@@ -57,7 +68,15 @@ const App: React.FC = () => {
     setIsLoading(true);
     setError(null);
     try {
-      if (!await checkApiKey()) throw new Error('Configure uma chave no servidor local ou conecte a chave no AI Studio.');
+      const policy = typeof resolveAccessPolicy === 'function' ? await resolveAccessPolicy() : null;
+      if (policy) {
+        const check = validateModelAccess(policy.mode, request.model);
+        if (!check.allowed) {
+          throw new Error(check.reason || 'Modelo não permitido para a política de acesso atual.');
+        }
+      } else if (!await checkApiKey()) {
+        throw new Error('Configure uma chave no servidor local ou conecte a chave no AI Studio.');
+      }
       const outcome = await runGeneration(request);
       if (outcome.status === 'busy') return;
       if (outcome.status === 'failed') throw new Error(outcome.error);
@@ -156,28 +175,46 @@ const App: React.FC = () => {
                                 handleConnect();
                             }
                         }}
-                        title={apiKeySet ? "API Key Connected" : "Connect API Key"}
+                        title={
+                            apiKeySet
+                            ? "API Key Connected"
+                            : accessPolicy.mode === 'aistudio_default'
+                            ? "Acesso padrão do AI Studio"
+                            : "Connect API Key"
+                        }
                         className={`flex items-center gap-2 px-3 py-1.5 rounded-full text-[10px] font-bold uppercase tracking-widest border transition-all ${
                             apiKeySet 
                             ? 'bg-green-900/10 text-green-400 border-green-900/40 hover:bg-green-900/20' 
+                            : accessPolicy.mode === 'aistudio_default'
+                            ? 'bg-amber-900/15 text-amber-300 border-amber-800/50 hover:bg-amber-900/25'
                             : 'bg-stone-800 text-stone-400 border-stone-700 hover:text-amber-500 hover:border-amber-600'
                         }`}
                     >
                         <Key size={12} />
-                        <span className="hidden sm:inline">{apiKeySet ? "Linked" : "Connect Key"}</span>
-                        <span className="sm:hidden">{apiKeySet ? "OK" : "Key"}</span>
+                        <span className="hidden sm:inline">
+                            {apiKeySet 
+                                ? (accessPolicy.mode === 'local_server' ? "Servidor Local" : "Chave Pessoal")
+                                : (accessPolicy.mode === 'aistudio_default' ? "Padrão AI Studio" : "Conectar Chave")
+                            }
+                        </span>
+                        <span className="sm:hidden">
+                            {apiKeySet ? "OK" : accessPolicy.mode === 'aistudio_default' ? "Padrão" : "Key"}
+                        </span>
                     </button>
                     {showKeyDropdown && apiKeySet && (
-                        <div className="absolute top-full right-0 mt-2 w-32 bg-stone-900 border border-stone-800 rounded-lg shadow-xl overflow-hidden z-50">
+                        <div className="absolute top-full right-0 mt-2 w-44 bg-stone-900 border border-stone-800 rounded-lg shadow-xl overflow-hidden z-50">
+                            <div className="px-3 py-1.5 text-[9px] text-stone-400 border-b border-stone-800 uppercase font-mono">
+                                {accessPolicy.label}
+                            </div>
                             <button
                                 onClick={async () => {
                                     await disconnectApiKey();
-                                    setApiKeySet(false);
+                                    await verifyKey();
                                     setShowKeyDropdown(false);
                                 }}
                                 className="w-full text-left px-4 py-2 text-xs text-red-400 hover:bg-stone-800 transition-colors"
                             >
-                                Disconnect
+                                Desconectar
                             </button>
                         </div>
                     )}

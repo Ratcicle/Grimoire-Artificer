@@ -1,4 +1,7 @@
 import { createGeminiClient, hasHostRuntimeCredential } from "./geminiTransport";
+import { AccessMode, AccessPolicyState, resolveAccessPolicy, validateModelAccess } from "./accessPolicy";
+export type { AccessMode, AccessPolicyState };
+export { resolveAccessPolicy, validateModelAccess };
 import { Type } from "@google/genai";
 import { 
   CardGenerationRequest, 
@@ -276,9 +279,13 @@ export const buildCardPrompt = (
   `;
 };
 
-export const generateCardArt = async (request: CardGenerationRequest, onRequest?: (attempted?: boolean) => void): Promise<GenerationResult> => {
-  // Always create a new instance to pick up the latest selected key
-  const ai = createGeminiClient(onRequest);
+export const generateCardArt = async (
+  request: CardGenerationRequest,
+  onRequest?: (attempted?: boolean) => void,
+  lockedMode?: AccessMode
+): Promise<GenerationResult> => {
+  // Always create a new instance to pick up the latest selected key and access policy
+  const ai = createGeminiClient(onRequest, lockedMode);
 
   let injectedPromptBlock = "";
   let usedReferences: { id: string; name: string }[] = [];
@@ -443,9 +450,10 @@ export const analyzeReferenceImage = async (
   base64Image: string,
   fileName: string,
   modelName: string = "gemini-3.5-flash",
-  onRequest?: (attempted?: boolean) => void
+  onRequest?: (attempted?: boolean) => void,
+  lockedMode?: AccessMode
 ): Promise<{ data: Partial<VisualDNA>; patch?: VisualDNAPatch; usageMetadata?: any }> => {
-  const ai = createGeminiClient(onRequest);
+  const ai = createGeminiClient(onRequest, lockedMode);
   
   let base64Data = base64Image;
   let mimeType = 'image/png';
@@ -662,6 +670,7 @@ declare global {
     aistudio?: {
       hasSelectedApiKey: () => Promise<boolean>;
       openSelectKey: () => Promise<void>;
+      clearSelectedApiKey?: () => Promise<void>;
     };
   }
 }

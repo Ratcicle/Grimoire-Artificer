@@ -103,6 +103,13 @@ const CardForm: React.FC<CardFormProps> = ({ onSubmit, isLoading, hasApiKey, onR
     }
   };
 
+  const handleFlashSelection = () => {
+    setModel(ImageModel.Flash);
+    if (!hasApiKey) {
+        onRequestKey();
+    }
+  };
+
   const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -209,14 +216,14 @@ const CardForm: React.FC<CardFormProps> = ({ onSubmit, isLoading, hasApiKey, onR
             >
                 <div className="flex items-center gap-2 mb-1">
                     <Crown size={14} className={model === ImageModel.Pro ? "text-amber-500" : ""} />
-                    <span className="text-[10px] font-bold uppercase">Pro (Paid)</span>
+                    <span className="text-[10px] font-bold uppercase">Pro (Pessoal)</span>
                 </div>
                 <span className="text-[9px] opacity-60">Gemini 3 Pro</span>
             </button>
 
             <button
                 type="button"
-                onClick={() => setModel(ImageModel.Flash)}
+                onClick={handleFlashSelection}
                 className={`relative p-3 rounded-lg border flex flex-col items-center gap-1 transition-all ${
                     model === ImageModel.Flash
                     ? 'bg-stone-800 border-amber-600 text-amber-100 shadow-lg shadow-amber-900/20' 
@@ -225,7 +232,7 @@ const CardForm: React.FC<CardFormProps> = ({ onSubmit, isLoading, hasApiKey, onR
             >
                 <div className="flex items-center gap-2 mb-1">
                     <Gauge size={14} className={model === ImageModel.Flash ? "text-amber-500" : ""} />
-                    <span className="text-[10px] font-bold uppercase">Flash (Paid)</span>
+                    <span className="text-[10px] font-bold uppercase">Flash (Pessoal)</span>
                 </div>
                 <span className="text-[9px] opacity-60">Gemini 3.1 Flash</span>
             </button>
@@ -241,7 +248,7 @@ const CardForm: React.FC<CardFormProps> = ({ onSubmit, isLoading, hasApiKey, onR
             >
                 <div className="flex items-center gap-2 mb-1">
                     <Sparkles size={14} className={model === ImageModel.Lite ? "text-green-500" : ""} />
-                    <span className="text-[10px] font-bold uppercase">Lite (Free)</span>
+                    <span className="text-[10px] font-bold uppercase">Lite (Padrão)</span>
                 </div>
                 <span className="text-[9px] opacity-60">Gemini 3.1 Flash Lite</span>
             </button>
