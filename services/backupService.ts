@@ -1,4 +1,5 @@
 import { VisualDNA } from '../types';
+import { ARCHIVED_TEXT_FIELDS, type ArchivedTextField, type ArchivedVisualDNA } from './visualDnaArchive';
 import { readDnaBackupSnapshot, applyLocalDnaBackup, type DnaBackupMutation, type DnaTombstone } from './localDbService';
 import { assertDnaOperationContext, captureDnaOperationContext, isDnaOperationContextCurrent, subscribeDnaChanges, type DnaOperationContext } from './dnaAccountContext';
 import { canonicalizeValue } from './visualDnaSyncUtils';
@@ -8,6 +9,8 @@ export const GRIMOIRE_BACKUP_VERSION = 2;
 
 type Rule = 'string' | 'number' | 'boolean' | 'owner' | { array: Rule } | { dictionary: Rule } | { shape: Record<string, Rule> } | { values: readonly string[] } | { either: Rule[] };
 const strings: Rule = { array: 'string' };
+const historicalText: Rule = { either: ['string', strings] };
+const archivedTextSchema = Object.fromEntries(ARCHIVED_TEXT_FIELDS.map(field => [field, historicalText])) as Record<ArchivedTextField, Rule>;
 const subjectShape: Rule = { shape: {
   id: 'string', description: 'string', category: 'string', visualRole: { values: ['primary', 'secondary', 'supporting'] },
   physicalScale: 'string', perceivedPresence: 'string', materials: strings, surfaces: strings, elements: strings,
@@ -22,11 +25,7 @@ const scoresShape = {
 // extensions never enter this explicit contract.
 const RECORD_SCHEMA = {
   id: 'string', name: 'string', imageUrl: 'string', ownerId: 'owner',
-  summary: 'string', linework: 'string', rendering: 'string', palette: 'string', silhouette: 'string', pose: 'string',
-  framing: 'string', composition: 'string', lighting: 'string', effects: 'string', materials: 'string', details: 'string',
-  background: 'string', hierarchy: 'string', positivePrompt: 'string', negativePrompt: { either: ['string', strings] },
-  visualMotifs: 'string', shapeLanguage: 'string', focalAnchors: 'string', detailPlacement: 'string', compositionRecipe: 'string',
-  paletteLogic: 'string', materialBehavior: 'string', energyDesign: 'string', styleAnchors: 'string', avoidRules: { either: ['string', strings] },
+  ...archivedTextSchema,
   stylePromptFragments: strings, contentMotifs: strings, identitySpecificDetails: strings,
   universalQualityAvoids: strings, styleSpecificAvoids: strings, contentSpecificAvoids: strings,
   subjectProfile: { shape: { primarySubject: 'string', subjectCategory: 'string', visualRole: 'string' } },
@@ -46,7 +45,7 @@ const RECORD_SCHEMA = {
 const OPERATIONAL_FIELDS = new Set(['createdAt', 'updatedAt', 'revision']);
 const TOMBSTONE_SCHEMA: Record<string, Rule> = { id: 'string', ownerId: 'owner', deletedAt: 'number', cloudDeleted: 'boolean', cloudDocumentId: 'string' };
 
-export type GrimoireBackupRecord = Partial<Omit<VisualDNA, 'usageMetadata'>> & Pick<VisualDNA, 'id' | 'name' | 'imageUrl'> & {
+export type GrimoireBackupRecord = ArchivedVisualDNA & {
   imageType: 'unknown' | 'thumbnail' | 'full';
 };
 export type GrimoireBackupTombstone = Omit<DnaTombstone, 'storageKey'>;
@@ -56,13 +55,13 @@ export interface GrimoireBackupFile {
   records: GrimoireBackupRecord[]; tombstones: GrimoireBackupTombstone[]; warnings: string[];
   summary: { totalRecords: number; calibratedCount: number; legacyCount: number; thumbnailCount: number; fullImageCount: number; unknownImageCount: number };
 }
-export interface ConflictItem { id: string; name: string; current: VisualDNA; incoming: VisualDNA; resolution: 'keep_current' | 'replace' }
-export interface DeletedConflictItem { id: string; name: string; incoming: VisualDNA; deletedAt: number; resolution: 'keep_deleted' | 'restore' }
+export interface ConflictItem { id: string; name: string; current: VisualDNA; incoming: ArchivedVisualDNA; resolution: 'keep_current' | 'replace' }
+export interface DeletedConflictItem { id: string; name: string; incoming: ArchivedVisualDNA; deletedAt: number; resolution: 'keep_deleted' | 'restore' }
 export interface BackupPreviewResult {
   valid: boolean; error?: string; warnings?: string[]; previewToken?: object;
   fileScope?: { ownerId: string | null; isLegacy: boolean; description: string; exportedAt: number };
   targetOwnerId: string | null; scopeMismatch?: boolean; scopeMismatchWarning?: string;
-  newRecords: VisualDNA[]; identicalRecords: VisualDNA[]; conflicts: ConflictItem[]; deletedConflicts: DeletedConflictItem[];
+  newRecords: ArchivedVisualDNA[]; identicalRecords: ArchivedVisualDNA[]; conflicts: ConflictItem[]; deletedConflicts: DeletedConflictItem[];
   summary: { totalIncoming: number; newCount: number; identicalCount: number; conflictCount: number; deletedConflictCount: number };
 }
 export type BackupApplyPlan = BackupPreviewResult;
@@ -94,7 +93,8 @@ function projectValue(value: unknown, rule: Rule, path: string, strict: boolean)
   }
   if ('array' in rule) {
     if (!Array.isArray(value)) return fail(`Lista inválida em ${path}.`);
-    return value.map((item, index) => projectValue(item, rule.array, `${path}[${index}]`, strict));
+    // Visit sparse entries too: JSON would turn holes into null, breaking restore.
+    return Array.from(value, (item, index) => projectValue(item, rule.array, `${path}[${index}]`, strict));
   }
   if ('dictionary' in rule) {
     if (!isObject(value)) return fail(`Objeto inválido em ${path}.`);
@@ -134,7 +134,7 @@ function validateImage(value: string): void {
   if (!({ png, jpeg, webp, gif }[match[1]])) fail('Bytes da imagem incompatíveis com o formato declarado.');
 }
 
-function validateRecord(record: Record<string, any>, ownerId: string | null, warnings: Set<string>): VisualDNA {
+function validateRecord(record: Record<string, any>, ownerId: string | null, warnings: Set<string>): ArchivedVisualDNA {
   if (!nonempty(record.id) || !nonempty(record.name) || typeof record.imageUrl !== 'string') fail('Registro sem id, nome ou imagem válidos.');
   validateImage(record.imageUrl);
   if (record.ownerId !== undefined && record.ownerId !== ownerId) fail('Proprietário do registro difere do escopo do arquivo.');
@@ -149,14 +149,17 @@ function validateRecord(record: Record<string, any>, ownerId: string | null, war
       if (typeof relation[key] !== 'string') fail(`Campo obrigatório ausente ou inválido em scaleRelationships[${index}].${key}.`);
     }
   }
-  collectAnalyticalWarnings(record as VisualDNA, warnings);
-  return record as VisualDNA;
+  collectAnalyticalWarnings(record as ArchivedVisualDNA, warnings);
+  return record as ArchivedVisualDNA;
 }
 
 // Archiving existing analysis does not certify its consistency. Keep recognizable
 // legacy relationships verbatim; structural/type/scope checks remain mandatory.
-function collectAnalyticalWarnings(record: VisualDNA, warnings: Set<string>): void {
+function collectAnalyticalWarnings(record: ArchivedVisualDNA, warnings: Set<string>): void {
   const label = describeRecord(record);
+  for (const field of ARCHIVED_TEXT_FIELDS) {
+    if (Array.isArray(record[field])) warnings.add(`${label}: ${field} utiliza representação histórica string[]; valor preservado sem migração.`);
+  }
   const subjectIds = new Set((record.subjects || []).map(subject => subject.id));
   for (const [index, relation] of (record.scaleRelationships || []).entries()) {
     const issues: string[] = [];
@@ -230,7 +233,7 @@ function readBackup(text: string) {
     }
     warnings.add(imageType === 'thumbnail' ? 'O arquivo contém miniaturas recuperáveis; elas não recuperam as imagens originais.' : 'As imagens serão preservadas como disponíveis no arquivo; a procedência original não está comprovada.');
     return validateRecord(projectObject(data, RECORD_SCHEMA, 'record', true), scope.ownerId, warnings);
-  })) as VisualDNA[];
+  })) as ArchivedVisualDNA[];
   const deletionIds = new Set<string>();
   const tombstones = (parsed.tombstones || []).map((raw: unknown) => {
     const t = projectObject(raw, TOMBSTONE_SCHEMA, 'tombstone', true);
@@ -258,8 +261,8 @@ const CALIBRATION_INDEPENDENT_FIELDS = new Set([
   'isCalibrated', 'calibrationVersion',
 ]);
 
-export function areRecordsSubstantivelyEqual(a: VisualDNA, b: VisualDNA): boolean {
-  const content = (record: VisualDNA) => {
+export function areRecordsSubstantivelyEqual(a: ArchivedVisualDNA, b: ArchivedVisualDNA): boolean {
+  const content = (record: ArchivedVisualDNA) => {
     const projected = projectObject(record, RECORD_SCHEMA, 'record', false);
     for (const key of OPERATIONAL_FIELDS) delete projected[key];
     return projected;
@@ -280,7 +283,7 @@ function validateCloudLink(value: { id: string; cloudDocumentId?: string }, owne
 interface PreparedPreview {
   context: DnaOperationContext; targetOwnerId: string | null; invalidated: boolean; applied: boolean;
   records: Map<string, VisualDNA>; tombstones: Map<string, DnaTombstone>;
-  incoming: Map<string, VisualDNA>; categories: Map<string, 'new' | 'identical' | 'conflict' | 'deleted'>;
+  incoming: Map<string, ArchivedVisualDNA>; categories: Map<string, 'new' | 'identical' | 'conflict' | 'deleted'>;
   deletionChanges: DnaTombstone[];
 }
 const preparedPreviews = new WeakMap<object, PreparedPreview>();
@@ -309,7 +312,7 @@ export async function validateAndPreviewBackup(jsonText: string, targetOwnerId: 
     if (pending.invalidated) fail('A conta mudou durante a preparação da prévia.');
     const records = new Map(snapshot.records.map(record => [record.id, record]));
     const tombstones = new Map(snapshot.tombstones.map(t => [t.id, t]));
-    const incoming = new Map<string, VisualDNA>();
+    const incoming = new Map<string, ArchivedVisualDNA>();
     const categories: PreparedPreview['categories'] = new Map();
     const preview: BackupPreviewResult = { ...empty, valid: true, warnings: data.warnings, previewToken: {}, fileScope: { ownerId: data.scope.ownerId, isLegacy: data.scope.isLegacy, description: data.scope.description || 'Biblioteca', exportedAt: data.exportedAt } };
     data.records.forEach(record => withRecordContext(record, () => {
@@ -320,12 +323,12 @@ export async function validateAndPreviewBackup(jsonText: string, targetOwnerId: 
       validateCloudLink(record, targetOwnerId, trustedLink);
       if (trustedLink && record.cloudDocumentId && trustedLink !== record.cloudDocumentId) fail('O vínculo cloud local difere do backup; restauração bloqueada.');
       const projected = projectObject(record, RECORD_SCHEMA, 'record', false);
-      const replacement = (data.version === 1 && current ? mergeLegacy(projectObject(current, RECORD_SCHEMA, 'current', false), projected) : projected) as VisualDNA;
+      const replacement = (data.version === 1 && current ? mergeLegacy(projectObject(current, RECORD_SCHEMA, 'current', false), projected) : projected) as ArchivedVisualDNA;
       replacement.ownerId = targetOwnerId;
       if (!replacement.cloudDocumentId && trustedLink) replacement.cloudDocumentId = trustedLink;
       if (data.version === 1 && current && replacement.isCalibrated && (record.isCalibrated === undefined || record.calibrationVersion === undefined) &&
           (current.isCalibrated !== replacement.isCalibrated || current.calibrationVersion !== replacement.calibrationVersion ||
-           Object.keys(replacement).some(key => !CALIBRATION_INDEPENDENT_FIELDS.has(key) && !same(replacement[key as keyof VisualDNA], current[key as keyof VisualDNA])))) {
+           Object.keys(replacement).some(key => !CALIBRATION_INDEPENDENT_FIELDS.has(key) && !same(replacement[key as keyof ArchivedVisualDNA], current[key as keyof VisualDNA])))) {
         replacement.isCalibrated = false;
         preview.warnings!.push('O backup V1 não comprova a calibração do conteúdo combinado. As notas serão preservadas e a calibração herdada não será aplicada.');
       }

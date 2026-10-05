@@ -1,4 +1,5 @@
 import { VisualDNA, TokenUsageLog } from '../types';
+import type { ArchivedVisualDNA } from './visualDnaArchive';
 import { assertDnaOperationContext, captureDnaOperationContext, notifyDnaChanges, subscribeDnaChanges, isDnaOperationContextCurrent } from './dnaAccountContext';
 import { canonicalizeValue } from './visualDnaSyncUtils';
 
@@ -230,7 +231,7 @@ export interface DnaBackupMutation {
   id: string;
   expectedRecord: VisualDNA | null;
   expectedTombstone: DnaTombstone | null;
-  record?: VisualDNA;
+  record?: ArchivedVisualDNA;
   tombstone?: DnaTombstone;
 }
 
