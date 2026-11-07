@@ -455,7 +455,8 @@ describe("Rodada 1: Generation Parameters and Reference Selection", () => {
         const details = logs.find(l => l.id === "armor-dna")?.details;
         const matchedTags = (details?.matches || []).map(m => m.tag.toLowerCase());
         expect(matchedTags).not.toContain("armor");
-        expect(details?.baseScore).toBe(0);
+        // "palácio" now reaches the English summary; only the excluded tag stays out.
+        expect(matchedTags).toContain("summary");
       });
     });
 

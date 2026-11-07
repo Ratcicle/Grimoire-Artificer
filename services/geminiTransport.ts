@@ -19,8 +19,11 @@ export function createGeminiClient(onRequest?: (attempted?: boolean) => void, ac
   return {
     models: {
       generateContent: async (request: GenerateContentParameters): Promise<GenerateContentResponse> => {
+        // An AbortSignal cannot cross the wire. It only ends this browser's wait.
+        const { abortSignal, ...config } = request.config ?? {};
         const payload = {
           ...request,
+          ...(request.config ? { config } : {}),
           accessMode: accessMode || 'unknown'
         };
         const body = JSON.stringify(payload);
@@ -33,13 +36,15 @@ export function createGeminiClient(onRequest?: (attempted?: boolean) => void, ac
             'Content-Type': 'application/json',
             'x-grimoire-access-mode': accessMode || 'unknown'
           },
-          body
+          body,
+          ...(abortSignal ? { signal: abortSignal } : {})
         });
         const data = await response.json();
         if (data.apiAttempted === false) onRequest?.(false);
         if (!response.ok) {
-          throw Object.assign(new Error(data.error || 'Gemini server request failed.'), {
-            usageMetadata: data.usageMetadata
+          throw Object.assign(new Error(data.detail ? `${data.error} ${data.detail}` : data.error || 'Gemini server request failed.'), {
+            usageMetadata: data.usageMetadata,
+            status: response.status
           });
         }
         // SDK .text is a getter; the server transports it explicitly.

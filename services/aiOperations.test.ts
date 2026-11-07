@@ -11,7 +11,7 @@ vi.mock('./geminiService', () => ({
   extractUsageFromError: (e: any) => e?.usageMetadata,
   mapUsageMetadata: (u: any) => ({ totalTokenCount: u?.totalTokenCount })
 }));
-vi.mock('./localDbService', () => ({getLocalDNA: mocks.read, saveTokenLog: mocks.log}));
+vi.mock('./localDbService', () => ({getLocalDNA: mocks.read, getLocalDNAById: async (id: string) => (await mocks.read()).find((d: VisualDNA) => d.id === id), saveTokenLog: mocks.log}));
 vi.mock('./cloudDnaService', () => ({saveDNA: mocks.save}));
 vi.mock('./visualDnaMerge', () => ({mergeVisualDNASafe: mocks.merge, createVisualDNAFromAnalysis: mocks.create}));
 vi.mock('./dnaAccountContext', () => ({
@@ -72,6 +72,32 @@ describe('real operation orchestration',()=>{
     response.resolve({imageUrl:'generated',usageMetadata});
     expect((await first).status).toBe('done');expect(mocks.log).toHaveBeenCalledTimes(1);expect(mocks.generate).toHaveBeenCalledTimes(1);
     await runGeneration(request);expect(mocks.generate).toHaveBeenCalledTimes(2);
+  });
+  it('replaceImage analyzes the new file and stores it, discarding the old analysis',async()=>{
+    const current={...dna,imageUrl:'old-thumbnail',summary:'old',energyDesign:'stale',tags:['boss monster','my custom tag'],createdAt:5,revision:3,cloudDocumentId:'doc',ownerId:'A'} as VisualDNA;
+    mocks.read.mockResolvedValue([current]);mocks.create.mockReturnValue({id:'a',name:'A',imageUrl:'new-image',summary:'new',tags:['dragon'],scores:{}});
+    const outcome=await runReferenceAnalysis({id:'a',name:'A renamed',imageUrl:'new-image',model:'mock',reanalyze:true,replaceImage:true});
+    expect(outcome.status).toBe('done');expect(mocks.analyze.mock.calls[0][0]).toBe('new-image');expect(mocks.merge).not.toHaveBeenCalled();
+    expect(mocks.create.mock.calls[0][0]).toMatchObject({id:'a',name:'A',imageUrl:'new-image',createdAt:5,revision:3});
+    const [saved,options]=mocks.save.mock.calls[0];
+    expect(saved).toMatchObject({id:'a',imageUrl:'new-image',summary:'new',cloudDocumentId:'doc',ownerId:'A'});
+    expect(saved.tags).toEqual(['dragon','my custom tag']);expect(saved).not.toHaveProperty('energyDesign');
+    expect(options.expected).toEqual(current);
+  });
+  it('refuses to reanalyze a cloud thumbnail before any model call',async()=>{
+    const header=[0xff,0xd8,0xff,0xc0,0,17,8,0,179,0,179,3,0,0,0,0,0,0,0,0,0];
+    mocks.read.mockResolvedValue([{...dna,imageUrl:`data:image/jpeg;base64,${btoa(String.fromCharCode(...header))}`}]);
+    const outcome=await runReferenceAnalysis({id:'a',name:'A',imageUrl:'x',model:'mock',reanalyze:true});
+    expect(outcome).toMatchObject({status:'failed',kind:'permanent'});expect(mocks.analyze).not.toHaveBeenCalled();expect(mocks.log).not.toHaveBeenCalled();
+  });
+  it('classifies a failed analysis so the queue can decide whether to wait or stop',async()=>{
+    mocks.analyze.mockImplementation(async(_i,_n,_m,started)=>{started();throw Object.assign(new Error('Please retry in 12s.'),{status:429});});
+    expect(await runReferenceAnalysis({id:'a',name:'A',imageUrl:'image',model:'mock',reanalyze:true})).toMatchObject({status:'failed',kind:'rate_limit',retryAfterMs:12000});
+  });
+  it('marks a merged reanalysis with the version of the analysis that produced it',async()=>{
+    mocks.analyze.mockImplementation(async(_i,_n,_m,started)=>{started();return {data:{analysisVersion:4},usageMetadata};});
+    await runReferenceAnalysis({id:'a',name:'A',imageUrl:'image',model:'mock',reanalyze:true});
+    expect(mocks.save.mock.calls[0][0].analysisVersion).toBe(4);
   });
   it('retains usage from an API error and does not retry',async()=>{
     mocks.generate.mockImplementation(async(_r,started)=>{started();throw Object.assign(new Error('API failed'),{usageMetadata});});

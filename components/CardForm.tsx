@@ -439,7 +439,7 @@ const CardForm: React.FC<CardFormProps> = ({ onSubmit, isLoading, hasApiKey, onR
                               : 'border-stone-850 opacity-65 hover:opacity-100'
                           }`}
                         >
-                          <img src={dna.imageUrl} alt={dna.name} className="w-full h-full object-cover" />
+                          <img src={dna.imageUrl} alt={dna.name} loading="lazy" decoding="async" className="w-full h-full object-cover" />
                           <div className="absolute inset-0 bg-stone-950/30 group-hover:bg-transparent transition-all" />
                           <div className="absolute top-1 left-1">
                             {isSelected ? (

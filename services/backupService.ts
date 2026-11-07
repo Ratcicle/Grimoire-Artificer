@@ -28,6 +28,7 @@ const RECORD_SCHEMA = {
   ...archivedTextSchema,
   stylePromptFragments: strings, contentMotifs: strings, identitySpecificDetails: strings,
   universalQualityAvoids: strings, styleSpecificAvoids: strings, contentSpecificAvoids: strings,
+  archetypeAffinity: strings,
   subjectProfile: { shape: { primarySubject: 'string', subjectCategory: 'string', visualRole: 'string' } },
   scaleProfile: { shape: { physicalScale: 'string', scaleForms: strings, scaleCues: strings, perceivedPresence: 'string', evidence: 'string', confidence: 'number' } },
   substanceProfile: { shape: { materials: strings, surfaces: strings, elements: strings, elementApplications: strings, evidence: 'string', confidence: 'number' } },

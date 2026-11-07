@@ -90,7 +90,7 @@ describe('Audit MERGE-03 creation from service-owned analysis', () => {
     const patch = merge.createVisualDNAPatch(raw, data);
     const created = merge.createVisualDNAFromAnalysis({ id: 'local-id', name: 'Local name', imageUrl: 'local-image', createdAt: 42 }, data, patch);
     expect(created).toMatchObject({ id: 'local-id', name: 'Local name', imageUrl: 'local-image', createdAt: 42,
-      analysisVersion: 3, analysisStatus: data.analysisStatus, isCalibrated: true, calibrationVersion: 3,
+      analysisVersion: 4, analysisStatus: data.analysisStatus, isCalibrated: true, calibrationVersion: 3,
       scores: { rendering: 0 }, warnings: ['Removed weapon infusion application due to missing elements.'] });
     for (const key of ['raw', 'patch', 'presentFields', 'normalized', 'clearFields', 'usageMetadata']) {
       expect(Object.hasOwn(created, key)).toBe(false);

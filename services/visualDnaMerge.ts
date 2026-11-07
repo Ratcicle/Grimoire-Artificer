@@ -1,10 +1,11 @@
 import { VisualDNA, VisualDNAPatch, SafeMergeResult } from '../types';
 import {
   ALL_CANONICAL_DIMENSIONS,
+  CURRENT_ANALYSIS_VERSION,
   isCalibratedRecord,
   ALLOWED_VISUAL_TAGS,
   getTagCategory, VISUAL_TAG_PRIORITY, VISUAL_TAG_CATEGORIES,
-  normalizeProfileBlocks, normalizeSubjects, normalizeScaleRelationships
+  normalizeArchetypeAffinity, normalizeProfileBlocks, normalizeSubjects, normalizeScaleRelationships
 } from './visualDnaContracts';
 
 export const CLEARABLE_ANALYTICAL_FIELDS = [
@@ -328,6 +329,12 @@ export function mergeVisualDNASafe(
       merged[field] = Array.isArray(base?.[field]) ? [...base[field]] : [];
       preservedFields.push(field);
     }
+  }
+
+  // Style fit is replaced as a whole. When omitted, the cloned base value stands.
+  if ('archetypeAffinity' in patch.raw) {
+    merged.archetypeAffinity = normalizeArchetypeAffinity(patch.raw.archetypeAffinity);
+    updatedFields.push('archetypeAffinity');
   }
 
   // 4. Subject Profile
@@ -655,7 +662,7 @@ export function createVisualDNAFromAnalysis(
   const created = mergeVisualDNASafe(localIdentity as VisualDNA, patch || createVisualDNAPatch(analysis)).data;
   Object.assign(created, localIdentity);
   // Only the service-owned normalized data can supply these markers; raw patch flags are ignored.
-  if (analysis.analysisVersion === 3) created.analysisVersion = 3;
+  if (analysis.analysisVersion === 3 || analysis.analysisVersion === CURRENT_ANALYSIS_VERSION) created.analysisVersion = analysis.analysisVersion;
   if (['complete', 'partial', 'legacy'].includes(analysis.analysisStatus)) created.analysisStatus = analysis.analysisStatus;
   created.warnings = Array.isArray(analysis.warnings)
     ? [...new Set(analysis.warnings.filter(w => typeof w === 'string' && w.trim()).map(w => w.trim().replace(/\s+/g, ' ')))] : [];

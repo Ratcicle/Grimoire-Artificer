@@ -1,5 +1,29 @@
 import {expect,it,vi} from 'vitest';
-import {prepareReferenceFiles,validateImageFile,imageExtension} from './imagePreparation';
+import {getDataUrlImageSize,isThumbnailImage,prepareReferenceFiles,validateImageFile,imageExtension} from './imagePreparation';
+const file=(name:string,size=100)=>({name,type:'image/png',size}) as File;
+const jpegOf=(width:number,height:number)=>{const bytes=[0xff,0xd8,0xff,0xe0,0,4,0,0,0xff,0xc0,0,17,8,height>>8,height&255,width>>8,width&255,3,0,0,0,0,0,0,0,0,0];return `data:image/jpeg;base64,${btoa(String.fromCharCode(...bytes))}`;};
+const pngOf=(width:number,height:number)=>{const bytes=[0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a,0,0,0,13,0x49,0x48,0x44,0x52,0,0,width>>8,width&255,0,0,height>>8,height&255,8,6,0,0];return `data:image/png;base64,${btoa(String.fromCharCode(...bytes))}`;};
+type Rec={id:string;name:string;current?:boolean};
+const library=(records:Rec[])=>({byName:new Map<string,Rec>(records.map(r=>[r.name.toLocaleLowerCase(),r])),isCurrent:(r:Rec)=>!!r.current});
+it('a same-name file updates its record, a finished one is skipped and a new one gets a new id',async()=>{
+ const compress=vi.fn().mockResolvedValue('prepared');
+ const result=await prepareReferenceFiles([file('Old Art.jpg'),file('Done Art.jpg'),file('New Art.jpg')],new Set(),compress,{existing:library([{id:'old-id',name:'old art'},{id:'done-id',name:'done art',current:true}])});
+ expect(result.items.map(i=>[i.name,i.operationType])).toEqual([['Old Art','upgrade'],['New Art',undefined]]);
+ expect(result.items[0].id).toBe('old-id');expect(result.items[1].id).not.toBe('old-id');
+ expect(result.skipped).toBe(1);expect(result.errors).toEqual([]);expect(compress).toHaveBeenCalledTimes(2);
+});
+it('accepts a folder larger than the former 100 MiB limit and reports progress',async()=>{
+ const files=Array.from({length:30},(_,i)=>file(`art-${i}.jpg`,8*1024*1024));const progress=vi.fn();
+ const result=await prepareReferenceFiles(files,new Set(),vi.fn().mockResolvedValue('prepared'),{onProgress:progress});
+ expect(result.items).toHaveLength(30);expect(result.errors).toEqual([]);expect(progress).toHaveBeenLastCalledWith(30,30);
+});
+it('reads image size from headers and recognizes cloud thumbnails',()=>{
+ expect(getDataUrlImageSize(jpegOf(179,179))).toEqual({width:179,height:179});
+ expect(getDataUrlImageSize(pngOf(800,600))).toEqual({width:800,height:600});
+ expect(isThumbnailImage(jpegOf(179,179))).toBe(true);expect(isThumbnailImage(jpegOf(180,133))).toBe(true);
+ expect(isThumbnailImage(jpegOf(624,624))).toBe(false);expect(isThumbnailImage(pngOf(800,800))).toBe(false);
+ expect(isThumbnailImage('data:image/png;base64,mock')).toBe(false);expect(isThumbnailImage('image')).toBe(false);expect(isThumbnailImage(undefined)).toBe(false);
+});
 it('reserves duplicate names within the batch, keeps dotted names and prepares sequentially',async()=>{
  const compress=vi.fn().mockResolvedValue('prepared');const files=['card.v1.png','card.v2.jpg','card.v1.png'].map(name=>({name,type:'image/png',size:100}) as File);
  const result=await prepareReferenceFiles(files,new Set(),compress);

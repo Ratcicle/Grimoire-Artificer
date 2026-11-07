@@ -1,8 +1,8 @@
 import { VisualDNA } from "../types";
 
 import {
-  ALLOWED_VISUAL_TAGS, ALL_CANONICAL_DIMENSIONS, getTagCategory, isCalibratedRecord,
-  validateVisualDNAScores, VISUAL_TAG_PRIORITY,
+  ALLOWED_VISUAL_TAGS, ALL_CANONICAL_DIMENSIONS, CURRENT_ANALYSIS_VERSION, getTagCategory, isCalibratedRecord,
+  normalizeArchetypeAffinity, validateVisualDNAScores, VISUAL_TAG_PRIORITY,
   normalizeProfileBlocks, normalizeSubjects, normalizeScaleRelationships
 } from './visualDnaContracts';
 export * from './visualDnaContracts';
@@ -208,6 +208,8 @@ export const normalizeVisualDNAAnalysis = (parsed: any, originalWarnings: string
     }
   });
 
+  if ('archetypeAffinity' in normalized) normalized.archetypeAffinity = normalizeArchetypeAffinity(normalized.archetypeAffinity);
+
   // Normalize arrays
   if (!Array.isArray(normalized.tags)) {
     normalized.tags = [];
@@ -336,7 +338,7 @@ export const normalizeVisualDNAAnalysis = (parsed: any, originalWarnings: string
     }
   }
 
-  normalized.analysisVersion = 3;
+  normalized.analysisVersion = CURRENT_ANALYSIS_VERSION;
   if (normalized.subjectProfile?.subjectCategory && normalized.scaleProfile?.physicalScale && normalized.substanceProfile?.materials) {
      normalized.analysisStatus = 'complete';
   } else if (normalized.subjectProfile || normalized.scaleProfile || normalized.substanceProfile) {

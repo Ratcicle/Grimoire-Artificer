@@ -1,7 +1,7 @@
 import { VisualDNA } from '../types';
 import {
   acknowledgeDnaDeletion, areLocalDnaSnapshotsEqual, deleteLocalDNA,
-  getDnaTombstones, getLocalDNA, saveLocalDNA, type DnaTombstone,
+  getDnaTombstones, getLocalDNA, getLocalDNAById, saveLocalDNA, type DnaTombstone,
 } from './localDbService';
 import { db, auth } from './firebase';
 import { collection, doc, setDoc, getDocs, deleteDoc, query, where } from 'firebase/firestore';
@@ -97,7 +97,7 @@ export const saveDNA = (dna: VisualDNA, options: SaveDnaOptions = {}): Promise<V
   const intent = reserveIntent(key);
   return serialize(key, async () => {
     assertDnaOperationContext(context);
-    const existing = (await getLocalDNA(context.ownerId)).find(item => item.id === dna.id);
+    const existing = await getLocalDNAById(dna.id, context.ownerId);
     assertDnaOperationContext(context);
     const metadata = existing ? migrateLegacyMetadata(existing).record : undefined;
     const now = Date.now();
@@ -121,7 +121,7 @@ export const saveDNA = (dna: VisualDNA, options: SaveDnaOptions = {}): Promise<V
     }
     if (!mayWriteCloud(context) || intentions.get(key) !== intent) return toSave;
     // A direct local transaction from another caller/tab may have changed the record.
-    const current = (await getLocalDNA(context.ownerId)).find(item => item.id === dna.id);
+    const current = await getLocalDNAById(dna.id, context.ownerId);
     if (!mayWriteCloud(context) || intentions.get(key) !== intent || !areLocalDnaSnapshotsEqual(current, toSave)) return toSave;
     try {
       await setDoc(doc(db, 'visualDNA', toSave.cloudDocumentId!), payload);
@@ -212,7 +212,7 @@ export const syncCloudAndLocal = async (): Promise<SyncResult> => {
           result.failures.push({ id, operation: 'conflict', message: 'A newer cloud operation completed after this synchronization snapshot.', retryable: true });
           return;
         }
-        const current = (await getLocalDNA(context.ownerId)).find(item => item.id === id);
+        const current = await getLocalDNAById(id, context.ownerId);
         assertDnaOperationContext(context);
         const tombstone = (await getDnaTombstones(context.ownerId)).find(item => item.id === id);
         assertDnaOperationContext(context);
@@ -249,7 +249,7 @@ export const syncCloudAndLocal = async (): Promise<SyncResult> => {
             result.failures.push({ id, operation: 'thumbnail', message: getErrorMessage(error), retryable: true });
             continue;
           }
-          const latest = (await getLocalDNA(context.ownerId)).find(item => item.id === id);
+          const latest = await getLocalDNAById(id, context.ownerId);
           assertDnaOperationContext(context);
           if ((intentions.get(key) ?? 0) !== (initialIntentions.get(key) ?? 0) || !areLocalDnaSnapshotsEqual(latest, snapshot)) {
             result.failures.push({ id, operation: 'conflict', message: 'Local reference changed before cloud upload.', retryable: true });

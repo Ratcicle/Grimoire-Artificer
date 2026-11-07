@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 import { VisualDNA } from "../types";
 import { 
   saveDNA, 
@@ -13,8 +13,9 @@ import {
 } from "../services/cloudDnaService";
 import { getLocalDNA } from "../services/localDbService";
 import { runReferenceAnalysis, isReferenceAnalyzing } from "../services/aiOperations";
-import { prepareReferenceFiles } from "../services/imagePreparation";
-import { subscribeDnaChanges, captureDnaOperationContext, isDnaOperationContextCurrent, notifyDnaChanges, type DnaOperationContext } from "../services/dnaAccountContext";
+import { isThumbnailImage, prepareReferenceFiles } from "../services/imagePreparation";
+import { runAnalysisBatch, type BatchItemResult, type BatchSummary } from "../services/analysisBatch";
+import { subscribeDnaChanges, suspendDnaNotifications, captureDnaOperationContext, isDnaOperationContextCurrent, notifyDnaChanges, type DnaOperationContext } from "../services/dnaAccountContext";
 import { compressImage } from "../services/imageUtils";
 import { auth, provider, signInWithPopup, signOut, onAuthStateChanged, User } from "../services/firebase";
 import { 
@@ -39,15 +40,38 @@ import {
   ALLOWED_VISUAL_TAGS, 
   VISUAL_TAG_KEYWORDS, 
   isCalibratedRecord,
+  hasTransferableAnalysis,
   getUtilityMatrixPresentationRows 
 } from "../services/visualTags";
 
 const ALLOWED_TAGS = ALLOWED_VISUAL_TAGS;
+const LIBRARY_PAGE_SIZE = 60;
+const QUEUE_ROW_LIMIT = 40;
+const PILOT_SIZE = 5;
+const QUEUE_DISPLAY_ORDER = { analyzing: 0, failed: 1, pending: 2, done: 3 };
+
+const formatDuration = (ms: number): string => {
+  const minutes = Math.max(1, Math.round(ms / 60000));
+  return minutes < 60 ? `${minutes} min` : `${Math.floor(minutes / 60)} h ${minutes % 60} min`;
+};
+
+const describeBatchEnd = ({ reason, completed, failed, lastError }: BatchSummary, isPilot: boolean): string => {
+  const tally = `${completed} analisadas, ${failed} com falha`;
+  if (reason === 'finished') {
+    return isPilot
+      ? `Piloto concluído: ${tally}. Confira o custo no Token Monitor e os novos registros antes de usar Analyze All.`
+      : `Lote concluído: ${tally}.${failed ? ' Analyze All tenta de novo apenas as que falharam.' : ''}`;
+  }
+  if (reason === 'stopped') return `Lote pausado: ${tally}. Analyze All continua de onde parou.`;
+  if (reason === 'quota_exhausted') return `Parado porque a cota diária ou o saldo acabou: ${tally}. Nada se perdeu; continue quando houver cota. ${lastError ?? ''}`;
+  if (reason === 'rate_limit') return `Parado porque o limite de requisições persistiu: ${tally}. Reduza as análises simultâneas e continue. ${lastError ?? ''}`;
+  return `Parado depois de falhas seguidas, para não gastar à toa: ${tally}. Último erro: ${lastError ?? 'desconhecido'}`;
+};
 
 const ArtstyleDatabase: React.FC<ArtstyleDatabaseProps> = ({ onBackToGrimoire }) => {
   const [dnaList, setDnaList] = useState<VisualDNA[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
-  const [uploadQueue, setUploadQueue] = useState<{ id: string; name: string; base64: string; status: 'pending' | 'analyzing' | 'done' | 'failed'; error?: string; operationType?: 'import' | 'reanalyze'; context: DnaOperationContext }[]>([]);
+  const [uploadQueue, setUploadQueue] = useState<{ id: string; name: string; base64: string; status: 'pending' | 'analyzing' | 'done' | 'failed'; error?: string; operationType?: 'import' | 'reanalyze' | 'upgrade'; context: DnaOperationContext }[]>([]);
   const [searchQuery, setSearchQuery] = useState<string>("");
   const [selectedTag, setSelectedTag] = useState<string | null>(null);
   const [selectedDna, setSelectedDna] = useState<VisualDNA | null>(null);
@@ -97,6 +121,14 @@ const ArtstyleDatabase: React.FC<ArtstyleDatabaseProps> = ({ onBackToGrimoire })
 
   const preparingFiles = useRef(false);
   const [preparing, setPreparing] = useState(false);
+  const [prepareProgress, setPrepareProgress] = useState<{ done: number; total: number } | null>(null);
+  const [batchConcurrency, setBatchConcurrency] = useState(3);
+  const [batchRun, setBatchRun] = useState<{ startedAt: number; doneAtStart: number } | null>(null);
+  const [batchStopping, setBatchStopping] = useState(false);
+  const [batchNote, setBatchNote] = useState("");
+  const [batchWaitUntil, setBatchWaitUntil] = useState(0);
+  const [visibleCount, setVisibleCount] = useState(LIBRARY_PAGE_SIZE);
+  const stopBatchRef = useRef(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // References to keep the async loop immune to stale React state closures
@@ -216,13 +248,21 @@ const ArtstyleDatabase: React.FC<ArtstyleDatabaseProps> = ({ onBackToGrimoire })
     const context = captureDnaOperationContext();
     try {
       const existing = await getLocalDNA(context.ownerId);
-      const reserved = new Set([...existing.map(d => d.name.toLocaleLowerCase()), ...uploadQueueRef.current.map(i => i.name.toLocaleLowerCase())]);
-      const result = await prepareReferenceFiles(files, reserved, file => compressImage(file, 800, 800, 0.8));
+      // When a name repeats, the most recently updated record is the one that gets the new image.
+      const byName = new Map<string, VisualDNA>();
+      for (const record of [...existing].sort((a, b) => (a.updatedAt ?? 0) - (b.updatedAt ?? 0))) byName.set(record.name.toLocaleLowerCase(), record);
+      const reserved = new Set<string>(uploadQueueRef.current.map(i => i.name.toLocaleLowerCase()));
+      const result = await prepareReferenceFiles(files, reserved, file => compressImage(file, 800, 800, 0.8), {
+        existing: { byName, isCurrent: record => hasTransferableAnalysis(record) && !isThumbnailImage(record.imageUrl) },
+        onProgress: (done, total) => setPrepareProgress({ done, total }),
+      });
       if (!isDnaOperationContextCurrent(context)) {setSyncStatusMsg('Conta alterada; importação descartada.');return;}
       updateQueue(items => [...items, ...result.items.map(item => ({...item,context}))]);
       setDuplicateWarning(result.errors);
+      const upgrades = result.items.filter(item => item.operationType === 'upgrade').length;
+      setSyncStatusMsg(`Prontas para análise: ${result.items.length - upgrades} novas e ${upgrades} atualizações. ${result.skipped} já analisadas foram puladas.`);
     } catch (error) {setSyncStatusMsg(error instanceof Error ? error.message : 'Falha ao preparar arquivos.');}
-    finally {preparingFiles.current=false;setPreparing(false);if(fileInputRef.current)fileInputRef.current.value='';}
+    finally {preparingFiles.current=false;setPreparing(false);setPrepareProgress(null);if(fileInputRef.current)fileInputRef.current.value='';}
   };
 
   const handleExportBackup = async (targetScope: 'current' | 'legacy') => {
@@ -330,51 +370,81 @@ const ArtstyleDatabase: React.FC<ArtstyleDatabaseProps> = ({ onBackToGrimoire })
     setUploadQueue(uploadQueueRef.current);
   };
 
-  const startAnalysis = async (itemId: string, sessionId?: string) => {
+  const startAnalysis = async (itemId: string, sessionId?: string): Promise<BatchItemResult> => {
     const item = uploadQueueRef.current.find(i => i.id === itemId);
-    if (!item || !isDnaOperationContextCurrent(item.context) || item.status === 'analyzing' || item.status === 'done' || isReferenceAnalyzing(itemId)) return;
+    if (!item || !isDnaOperationContextCurrent(item.context) || item.status === 'analyzing' || item.status === 'done' || isReferenceAnalyzing(itemId)) return {status:'skipped'};
     updateQueue(items => items.map(i => i.id === itemId ? {...i,status:'analyzing',error:undefined} : i));
-    const outcome = await runReferenceAnalysis({id:itemId,name:item.name,imageUrl:item.base64,model:analysisModel,reanalyze:item.operationType === 'reanalyze',sessionId,context:item.context});
-    if (!isDnaOperationContextCurrent(item.context)) return;
-    if (outcome.status === 'busy') return;
+    const outcome = await runReferenceAnalysis({id:itemId,name:item.name,imageUrl:item.base64,model:analysisModel,reanalyze:item.operationType === 'reanalyze' || item.operationType === 'upgrade',replaceImage:item.operationType === 'upgrade',sessionId,context:item.context});
+    if (!isDnaOperationContextCurrent(item.context)) return {status:'skipped'};
+    if (outcome.status === 'busy') return {status:'skipped'};
+    // During a batch the library is patched in memory: re-reading it would copy every image per item.
+    const inBatch = isProcessingQueueRef.current;
+    let result: BatchItemResult = {status:'skipped'};
     if (outcome.status === 'deleted') {
       updateQueue(items => items.filter(i => i.id !== itemId));
       setSyncStatusMsg('Referência excluída durante a análise; resultado descartado.');
     } else if (outcome.status === 'done') {
-      updateQueue(items => items.map(i => i.id === itemId ? {...i,status:'done'} : i));
-      setSelectedDna(prev => !prev || prev.id === itemId ? outcome.record : prev);
-      setSyncStatusMsg(outcome.changed ? 'Análise salva.' : 'Análise concluída sem alterações.');
+      result = {status:'done'};
+      updateQueue(items => items.map(i => i.id === itemId ? {...i,status:'done',base64:''} : i));
+      if (inBatch) {
+        setDnaList(list => list.some(d => d.id === itemId) ? list.map(d => d.id === itemId ? outcome.record : d) : [outcome.record, ...list]);
+      } else {
+        setSelectedDna(prev => !prev || prev.id === itemId ? outcome.record : prev);
+        setSyncStatusMsg(outcome.changed ? 'Análise salva.' : 'Análise concluída sem alterações.');
+      }
     } else {
       const message = outcome.status === 'conflict' ? 'Registro alterado durante análise. Atualização descartada.' : outcome.error;
+      result = outcome.status === 'failed'
+        ? {status:'failed',kind:outcome.kind ?? 'permanent',retryAfterMs:outcome.retryAfterMs,error:message}
+        : {status:'failed',kind:'permanent',error:message};
       updateQueue(items => items.map(i => i.id === itemId ? {...i,status:'failed',error:message} : i));
-      setSyncStatusMsg(message);
+      if (!inBatch) setSyncStatusMsg(message);
     }
-    await loadDatabase();
+    if (!inBatch) await loadDatabase();
+    return result;
   };
 
-  const startAllPending = async () => {
+  const startAllPending = async (limit?: number) => {
     if (isProcessingQueueRef.current) return;
+    const candidates = uploadQueueRef.current.filter(i => i.status === 'pending' || i.status === 'failed').map(i => i.id);
+    if (candidates.length === 0) return;
 
     isProcessingQueueRef.current = true;
+    stopBatchRef.current = false;
     const context = captureDnaOperationContext();
-    const attemptedIds = new Set<string>();
     const sessionId = crypto.randomUUID();
+    const releaseNotifications = suspendDnaNotifications();
+    setBatchNote("");
+    setBatchStopping(false);
+    setBatchRun({ startedAt: Date.now(), doneAtStart: uploadQueueRef.current.filter(i => i.status === 'done').length });
 
     try {
-      while (isDnaOperationContextCurrent(context)) {
-        // Find next item to analyze from the up-to-date queue reference
-        const nextItem = uploadQueueRef.current.find(i => 
-          (i.status === 'pending' || i.status === 'failed') && !attemptedIds.has(i.id)
-        );
-        if (!nextItem) break;
-
-        attemptedIds.add(nextItem.id);
-        await startAnalysis(nextItem.id, sessionId);
-      }
+      const summary = await runAnalysisBatch({
+        ids: limit ? candidates.slice(0, limit) : candidates,
+        concurrency: batchConcurrency,
+        analyze: id => startAnalysis(id, sessionId),
+        shouldStop: () => stopBatchRef.current || !isDnaOperationContextCurrent(context),
+        onWaiting: waitMs => setBatchWaitUntil(Date.now() + waitMs),
+      });
+      setBatchNote(describeBatchEnd(summary, !!limit));
     } finally {
       isProcessingQueueRef.current = false;
+      setBatchRun(null);
+      setBatchStopping(false);
+      setBatchWaitUntil(0);
+      releaseNotifications();
+      void loadDatabase();
     }
   };
+
+  useEffect(() => {
+    if (!batchRun) return;
+    const warnBeforeLeaving = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ''; };
+    window.addEventListener('beforeunload', warnBeforeLeaving);
+    return () => window.removeEventListener('beforeunload', warnBeforeLeaving);
+  }, [!!batchRun]);
+
+  useEffect(() => setVisibleCount(LIBRARY_PAGE_SIZE), [searchQuery, selectedTag]);
 
   const handleDelete = async (id: string, e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
@@ -406,6 +476,10 @@ const ArtstyleDatabase: React.FC<ArtstyleDatabaseProps> = ({ onBackToGrimoire })
   const handleReanalyze = async (dna: VisualDNA) => {
     const context = { ownerId: user?.uid ?? null };
     if (!isDnaOperationContextCurrent(context) || isReferenceAnalyzing(dna.id)) return;
+    if (isThumbnailImage(dna.imageUrl)) {
+      setSyncStatusMsg('Esta referência só tem a miniatura da nuvem. Importe o arquivo original com o mesmo nome para reanalisá-la.');
+      return;
+    }
     if (reanalyzingConfirmId !== dna.id) {
       setReanalyzingConfirmId(dna.id);
       setTimeout(() => setReanalyzingConfirmId(current => current === dna.id ? null : current), 3000);
@@ -479,6 +553,22 @@ const ArtstyleDatabase: React.FC<ArtstyleDatabaseProps> = ({ onBackToGrimoire })
     updateQueue(items => items.filter(i => i.status === 'analyzing' || i.status === 'pending'));
   };
 
+  const thumbnailCount = useMemo(() => dnaList.filter(item => isThumbnailImage(item.imageUrl)).length, [dnaList]);
+  const tagCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const item of dnaList) for (const tag of item.tags || []) counts.set(tag, (counts.get(tag) ?? 0) + 1);
+    return counts;
+  }, [dnaList]);
+  const queueCounts = { pending: 0, analyzing: 0, done: 0, failed: 0 };
+  for (const item of uploadQueue) queueCounts[item.status]++;
+  const finishedThisRun = batchRun ? queueCounts.done - batchRun.doneAtStart : 0;
+  const batchEta = batchRun && finishedThisRun > 0
+    ? (Date.now() - batchRun.startedAt) / finishedThisRun * (queueCounts.pending + queueCounts.analyzing)
+    : null;
+  const visibleQueue = [...uploadQueue]
+    .sort((a, b) => QUEUE_DISPLAY_ORDER[a.status] - QUEUE_DISPLAY_ORDER[b.status])
+    .slice(0, QUEUE_ROW_LIMIT);
+
   // Filter List
   const filteredList = dnaList.filter(item => {
     const matchesSearch = 
@@ -493,7 +583,7 @@ const ArtstyleDatabase: React.FC<ArtstyleDatabaseProps> = ({ onBackToGrimoire })
   return (
     <div className="flex flex-col lg:flex-row gap-8 w-full min-h-full items-start">
       
-      {preparing && <p role="status">Preparando imagens localmente...</p>}
+      {preparing && <p role="status">Preparando imagens localmente...{prepareProgress ? ` ${prepareProgress.done} de ${prepareProgress.total}` : ''}</p>}
       {/* Left panel: Reference List and Upload queue */}
       <div className="flex-1 w-full flex flex-col gap-6">
         
@@ -537,6 +627,12 @@ const ArtstyleDatabase: React.FC<ArtstyleDatabaseProps> = ({ onBackToGrimoire })
                   {user ? 'Biblioteca desta conta. Referências antigas sem proprietário continuam disponíveis sem login.' : 'Biblioteca local sem conta. Conectar uma conta abre a biblioteca separada desse usuário.'}
                 </p>
               </div>
+              {thumbnailCount > 0 && (
+                <p className="text-[11px] text-amber-300/90 mt-2 flex items-start gap-1.5">
+                  <AlertTriangle size={12} className="shrink-0 mt-0.5" />
+                  <span>{thumbnailCount} referências só têm a miniatura da nuvem neste aparelho. Para reanalisá-las, importe os arquivos originais com o mesmo nome.</span>
+                </p>
+              )}
 
               <div className="flex flex-col gap-3 mt-4 pt-4 border-t border-stone-800/60">
                 <div className="flex flex-wrap items-center justify-between gap-4 bg-stone-950/40 p-4 rounded-xl border border-stone-800/40">
@@ -683,6 +779,7 @@ const ArtstyleDatabase: React.FC<ArtstyleDatabaseProps> = ({ onBackToGrimoire })
                   className="bg-transparent text-[10px] font-bold text-amber-500 focus:outline-none cursor-pointer uppercase tracking-wider border-none p-0 pr-1 h-full text-right"
                 >
                   <option value="gemini-4-argon" className="bg-stone-950 text-stone-300">Gemini 4 Argon</option>
+                  <option value="gemini-3.8-flash" className="bg-stone-950 text-stone-300">Gemini 3.8 Flash</option>
                 </select>
               </div>
               <button
@@ -849,7 +946,7 @@ const ArtstyleDatabase: React.FC<ArtstyleDatabaseProps> = ({ onBackToGrimoire })
                     {!isCollapsed && (
                       <div className="p-3 flex flex-wrap gap-1.5 max-h-40 overflow-y-auto scrollbar-thin">
                         {matchedTags.map(tag => {
-                          const count = dnaList.filter(item => (item.tags || []).includes(tag)).length;
+                          const count = tagCounts.get(tag) ?? 0;
                           const isSelected = selectedTag === tag;
                           return (
                             <button
@@ -886,14 +983,45 @@ const ArtstyleDatabase: React.FC<ArtstyleDatabaseProps> = ({ onBackToGrimoire })
                 <RefreshCw size={14} className="text-amber-500 animate-spin-slow" />
                 <h4 className="text-xs font-bold uppercase tracking-widest text-stone-300">Analysis Queue ({uploadQueue.length})</h4>
               </div>
-              <div className="flex gap-2">
-                <button 
-                  onClick={startAllPending} 
-                  className="px-3 py-1 bg-amber-900/20 hover:bg-amber-900/40 text-amber-300 border border-amber-900/30 text-[10px] font-bold uppercase tracking-widest rounded transition-all"
-                >
-                  Analyze All
-                </button>
-                <button 
+              <div className="flex flex-wrap items-center justify-end gap-2">
+                <label className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-widest text-stone-500">
+                  Simultâneas
+                  <select
+                    aria-label="Análises simultâneas"
+                    value={batchConcurrency}
+                    disabled={!!batchRun}
+                    onChange={(e) => setBatchConcurrency(Number(e.target.value))}
+                    className="bg-stone-950/80 border border-stone-800 rounded px-1.5 py-0.5 text-[10px] font-bold text-stone-300 focus:outline-none"
+                  >
+                    {[1, 2, 3, 4].map(value => <option key={value} value={value}>{value}</option>)}
+                  </select>
+                </label>
+                {batchRun ? (
+                  <button
+                    onClick={() => { stopBatchRef.current = true; setBatchStopping(true); }}
+                    disabled={batchStopping}
+                    className="px-3 py-1 bg-red-950/30 hover:bg-red-950/50 text-red-300 border border-red-900/40 text-[10px] font-bold uppercase tracking-widest rounded transition-all"
+                  >
+                    {batchStopping ? 'Pausando...' : 'Pausar'}
+                  </button>
+                ) : (
+                  <>
+                    <button
+                      onClick={() => startAllPending(PILOT_SIZE)}
+                      className="px-3 py-1 bg-stone-950/80 hover:bg-stone-900 text-amber-300 border border-amber-900/30 text-[10px] font-bold uppercase tracking-widest rounded transition-all"
+                      title="Analisa só as próximas 5, para conferir custo e resultado"
+                    >
+                      Piloto ({PILOT_SIZE})
+                    </button>
+                    <button
+                      onClick={() => startAllPending()}
+                      className="px-3 py-1 bg-amber-900/20 hover:bg-amber-900/40 text-amber-300 border border-amber-900/30 text-[10px] font-bold uppercase tracking-widest rounded transition-all"
+                    >
+                      Analyze All
+                    </button>
+                  </>
+                )}
+                <button  
                   onClick={clearQueue} 
                   className="px-3 py-1 bg-stone-950/80 hover:bg-stone-900 text-stone-400 text-[10px] font-bold uppercase tracking-widest rounded transition-all"
                 >
@@ -902,14 +1030,34 @@ const ArtstyleDatabase: React.FC<ArtstyleDatabaseProps> = ({ onBackToGrimoire })
               </div>
             </div>
 
+            {(batchRun || batchNote) && (
+              <div role="status" className="mb-3 p-3 bg-stone-950/60 rounded-xl border border-stone-800/80 text-[11px] leading-relaxed text-stone-300 space-y-1">
+                {batchRun && (
+                  <>
+                    <p>
+                      {queueCounts.done} de {uploadQueue.length} concluídas · {queueCounts.analyzing} em andamento · {queueCounts.pending} na fila · {queueCounts.failed} com falha
+                      {batchEta !== null && ` · cerca de ${formatDuration(batchEta)} restantes`}
+                    </p>
+                    {batchWaitUntil > Date.now() && (
+                      <p className="text-amber-300">Aguardando o provedor até {new Date(batchWaitUntil).toLocaleTimeString()}. A fila retoma sozinha.</p>
+                    )}
+                    <p className="text-stone-500">Mantenha esta aba aberta. Se ela fechar, importe a pasta de novo: as artes já analisadas são puladas.</p>
+                  </>
+                )}
+                {batchNote && <p>{batchNote}</p>}
+              </div>
+            )}
+
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 max-h-60 overflow-y-auto pr-1">
-              {uploadQueue.map((item) => (
+              {visibleQueue.map((item) => (
                 <div key={item.id} className="flex gap-3 p-2 bg-stone-950/60 rounded-xl border border-stone-800/80 items-center justify-between overflow-hidden">
                   <div className="flex gap-3 items-center min-w-0">
-                    <img src={item.base64} alt="preview" className="w-10 h-10 object-cover rounded bg-black" />
+                    {item.base64
+                      ? <img src={item.base64} alt="preview" loading="lazy" decoding="async" className="w-10 h-10 object-cover rounded bg-black" />
+                      : <div className="w-10 h-10 rounded bg-black" />}
                     <div className="min-w-0">
                       <p className="text-[10px] font-bold text-stone-300 truncate">{item.name}</p>
-                      {item.status === 'pending' && <p className="text-[9px] text-stone-500 uppercase tracking-wider mt-0.5">Ready for AI parsing</p>}
+                      {item.status === 'pending' && <p className="text-[9px] text-stone-500 uppercase tracking-wider mt-0.5">{item.operationType === 'upgrade' ? 'Substitui imagem e análise' : 'Ready for AI parsing'}</p>}
                       {item.status === 'analyzing' && <p className="text-[9px] text-amber-500 animate-pulse uppercase tracking-wider mt-0.5">Extracting visual DNA...</p>}
                       {item.status === 'done' && <p className="text-[9px] text-green-400 flex items-center gap-1 uppercase tracking-wider mt-0.5"><Check size={10} /> Saved to grimoire</p>}
                       {item.status === 'failed' && <p className="text-[9px] text-red-400 flex items-center gap-1 uppercase tracking-wider mt-0.5 truncate" title={item.error}><AlertCircle size={10} /> Error</p>}
@@ -935,6 +1083,9 @@ const ArtstyleDatabase: React.FC<ArtstyleDatabaseProps> = ({ onBackToGrimoire })
                 </div>
               ))}
             </div>
+            {uploadQueue.length > visibleQueue.length && (
+              <p className="text-[10px] text-stone-500 mt-2">Mostrando {visibleQueue.length} de {uploadQueue.length} itens da fila.</p>
+            )}
           </div>
         )}
 
@@ -968,7 +1119,7 @@ const ArtstyleDatabase: React.FC<ArtstyleDatabaseProps> = ({ onBackToGrimoire })
             </div>
           ) : (
             <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
-              {filteredList.map((item) => (
+              {filteredList.slice(0, visibleCount).map((item) => (
                 <div
                   key={item.id}
                   onClick={() => {
@@ -979,7 +1130,7 @@ const ArtstyleDatabase: React.FC<ArtstyleDatabaseProps> = ({ onBackToGrimoire })
                   className={`group cursor-pointer rounded-xl border overflow-hidden bg-stone-900/20 hover:bg-stone-900/40 hover:border-stone-700 transition-all ${selectedDna?.id === item.id ? 'border-amber-600 ring-1 ring-amber-600/30 bg-stone-900/50' : 'border-stone-800/80'}`}
                 >
                   <div className="relative aspect-[4/3] bg-black overflow-hidden">
-                    <img src={item.imageUrl} alt={item.name} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500" />
+                    <img src={item.imageUrl} alt={item.name} loading="lazy" decoding="async" className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500" />
                     {reanalyzingIds.has(item.id) && (
                       <div className="absolute inset-0 bg-stone-950/80 backdrop-blur-sm flex flex-col items-center justify-center gap-2 z-10">
                         <RefreshCw size={16} className="text-amber-500 animate-spin" />
@@ -1021,6 +1172,14 @@ const ArtstyleDatabase: React.FC<ArtstyleDatabaseProps> = ({ onBackToGrimoire })
                 </div>
               ))}
             </div>
+          )}
+          {filteredList.length > visibleCount && (
+            <button
+              onClick={() => setVisibleCount(count => count + LIBRARY_PAGE_SIZE)}
+              className="w-full py-2 bg-stone-900/40 hover:bg-stone-900 text-stone-400 hover:text-stone-200 border border-stone-800 text-[10px] font-bold uppercase tracking-widest rounded-lg transition-all cursor-pointer"
+            >
+              Mostrar mais ({filteredList.length - visibleCount} restantes)
+            </button>
           )}
         </div>
       </div>
@@ -1103,13 +1262,18 @@ const ArtstyleDatabase: React.FC<ArtstyleDatabaseProps> = ({ onBackToGrimoire })
                 ) : (
                   <div className="flex items-center gap-2 flex-wrap pr-24 pointer-events-auto">
                     <h4 className="text-base font-serif font-bold text-stone-100 tracking-wide">{selectedDna.name}</h4>
-                    {Number(selectedDna.analysisVersion) === 3 ? (
+                    {Number(selectedDna.analysisVersion) >= 3 ? (
                       <span className="px-1.5 py-0.5 bg-amber-500/15 text-amber-400 border border-amber-500/30 text-[8px] font-bold font-mono uppercase rounded tracking-wider">
-                        V3 Engine
+                        V{selectedDna.analysisVersion} Engine
                       </span>
                     ) : (
                       <span className="px-1.5 py-0.5 bg-stone-950 text-stone-500 border border-stone-900 text-[8px] font-bold font-mono uppercase rounded tracking-wider">
                         Legacy Engine
+                      </span>
+                    )}
+                    {isThumbnailImage(selectedDna.imageUrl) && (
+                      <span className="px-1.5 py-0.5 bg-amber-950/80 text-amber-300 border border-amber-800/40 text-[8px] font-bold font-mono uppercase rounded tracking-wider" title="Cópia de até 180 px vinda da nuvem. Importe o original para reanalisar.">
+                        Miniatura
                       </span>
                     )}
                     {isCalibratedRecord(selectedDna) ? (

@@ -1,5 +1,6 @@
 import { Archetype, Context, CardType, Complexity, VisualDNA, ContributionEvaluation } from "../types";
 import { parsePromptIntent, matchesPromptExclusion } from "./promptParser";
+import { hasTransferableAnalysis, TRANSFERABLE_TECHNIQUE_FIELDS } from "./visualDnaContracts";
 
 export interface SynthesisContext {
   subject: string;
@@ -336,6 +337,17 @@ const CONDITIONAL_FEATURE_PATTERNS = [
   /\b(?:colossal|gargantuan|mountain[- ]sized|towering\s+over\s+cities|gigantic\s+presence)\b/i
 ];
 
+// What a technique has no reason to name, beyond the subjects and materials listed further down.
+const NAMED_CONTENT_PATTERN = /\b(?:arms?|hands?|legs?|feet|fists?|shoulders?|heads?|skulls?|skin|wings?|eyes?|torso|chest|spines?|claws?|fangs?|horns?|tails?|fins?|hair|faces?|scales|feathers?|fur|spikes?|metal|gems?|gemstones?|jewels?|weapons?|blades?|joints?|panels?|mecha|robots?|grimoires?)\b/i;
+
+/** Analysis v4 fields have an open vocabulary, but any content they name still needs support. */
+const namesUnsupportedContent = (text: string, context: SynthesisContext, rules: ArchetypePolicyRules): boolean => {
+  const support = evidenceWords([context.affirmativeText, ...rules.signatureTerms, ...(rules.allowedMaterials || []), ...(rules.allowedClothingColors || [])].join(' '));
+  return [...CONDITIONAL_FEATURE_PATTERNS, NAMED_CONTENT_PATTERN].some(pattern =>
+    [...text.matchAll(new RegExp(pattern.source, 'gi'))].some(match =>
+      !NORMALIZE(match[0]).split(/\s+/).some(word => support.has(word))));
+};
+
 /**
  * Character/humanoid subject and portrait markers to check when Context Focus is Object or Scenario.
  */
@@ -456,7 +468,8 @@ export const filterFragmentForIdentity = (
 export const checkSingleClauseCompatibility = (
   clauseText: string,
   context: SynthesisContext,
-  field?: string
+  field?: string,
+  transferableTechnique = false
 ): { compatible: boolean; reason: string } => {
   const normClause = NORMALIZE(clauseText);
   if (!normClause) {
@@ -763,7 +776,11 @@ export const checkSingleClauseCompatibility = (
       const col = occ.color;
       const textBefore = clauseText.slice(0, occ.index);
       const textAfter = clauseText.slice(occ.index + occ.length);
-      const role = determineRoleForOccurrence(col, textBefore, textAfter);
+      // The Generic preset has no palette to defend, and a v4 technique describes no garment:
+      // any garment it named was already rejected as content, so "clothing" cannot be the role.
+      if (transferableTechnique && context.archetype === Archetype.Generic) continue;
+      const detectedRole = determineRoleForOccurrence(col, textBefore, textAfter);
+      const role = transferableTechnique && detectedRole === 'clothing' && !specifiesClothing ? 'palette' : detectedRole;
 
       // Linework / outlines: transferable illustration technique
       if (role === 'linework') {
@@ -904,6 +921,16 @@ export const checkSingleClauseCompatibility = (
     }
   }
 
+  if (transferableTechnique) {
+    if (normClause.split(/\s+/).length < 3) {
+      return { compatible: false, reason: 'Too short to stand alone as a technique.' };
+    }
+    if (namesUnsupportedContent(clauseText, context, archetypeRules)) {
+      return { compatible: false, reason: 'Names content with no affirmative support in the subject or preset.' };
+    }
+    return { compatible: true, reason: 'Transferable technique from analysis v4.' };
+  }
+
   if (!hasPositiveAdmission(clauseText, context, archetypeRules, field)) {
     return { compatible: false, reason: 'Conditional content has no affirmative support in the subject or preset.' };
   }
@@ -974,8 +1001,12 @@ export const evaluateCandidateFragment = (
 
   const targetText = identityResult.cleanedText;
 
+  // Analysis v4 writes one self-contained technique, so a comma never starts a new
+  // idea there and splitting would only leave fragments behind.
+  const transferableTechnique = hasTransferableAnalysis(ref) && TRANSFERABLE_TECHNIQUE_FIELDS.includes(field);
+
   // 2. Clause decomposition if compound phrase separated by commas/semicolons
-  const subClauses = targetText.split(/[,;]+/).map(c => c.trim()).filter(Boolean);
+  const subClauses = transferableTechnique ? [targetText] : targetText.split(/[,;]+/).map(c => c.trim()).filter(Boolean);
 
   if (subClauses.length > 1) {
     const acceptedClauses: string[] = [];
@@ -1021,7 +1052,7 @@ export const evaluateCandidateFragment = (
   }
 
   // Single clause evaluation
-  const compatResult = checkSingleClauseCompatibility(targetText, context, field);
+  const compatResult = checkSingleClauseCompatibility(targetText, context, field, transferableTechnique);
   if (!compatResult.compatible) {
     return {
       decision: "discarded",

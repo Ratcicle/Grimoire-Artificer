@@ -6,9 +6,12 @@ interface ServerGeminiOptions {
   generate: (request: GenerateContentParameters) => Promise<any>;
 }
 
+// Matches the highest concurrency the analysis queue offers.
+const MAX_CONCURRENT_OPERATIONS = 4;
+
 /** Development-only, same-origin endpoint. Keys never leave the Node process. */
 export function createGeminiMiddleware(options: ServerGeminiOptions) {
-  let running = false;
+  let inFlight = 0;
   return async (req: IncomingMessage, res: ServerResponse, next: () => void) => {
     if (!req.url?.startsWith('/api/gemini/')) return next();
     let apiAttempted = false;
@@ -39,11 +42,11 @@ export function createGeminiMiddleware(options: ServerGeminiOptions) {
       return respond(503, { error: 'GEMINI_API_KEY is not configured on the local server.' });
     }
 
-    if (running) {
-      return respond(409, { error: 'A Gemini operation is already running.' });
+    if (inFlight >= MAX_CONCURRENT_OPERATIONS) {
+      return respond(409, { error: 'Too many Gemini operations are already running.' });
     }
 
-    running = true;
+    inFlight++;
     try {
       let body = '';
       for await (const chunk of req) {
@@ -63,6 +66,7 @@ export function createGeminiMiddleware(options: ServerGeminiOptions) {
         'gemini-3.1-flash-lite-image',
         'gemini-3.5-flash',
         'gemini-3.1-pro-preview',
+        'gemini-3.8-flash',
         'gemini-4-argon'
       ];
 
@@ -86,17 +90,20 @@ export function createGeminiMiddleware(options: ServerGeminiOptions) {
       const response = await options.generate(request);
       respond(200, { ...response, text: response.text });
     } catch (error: any) {
-      const isQuota = /quota|rate|exhausted|429/i.test(error?.message || '');
-      const status = error instanceof SyntaxError ? 400 : isQuota ? 429 : 502;
+      const message = String(error?.message || '').replace(/AIza[\w-]{20,}/g, '[key]');
+      const upstream = typeof error?.status === 'number' && error.status >= 400 && error.status < 600 ? error.status : undefined;
+      const isQuota = upstream === 429 || /\bquota\b|rate.?limit|exhausted|\b429\b/i.test(message);
+      const status = error instanceof SyntaxError ? 400 : isQuota ? 429 : upstream ?? 502;
       const errorMsg = isQuota
-        ? (error?.message || 'Cota de requisições excedida no provedor.')
+        ? (message || 'Cota de requisições excedida no provedor.')
         : 'Gemini operation failed. Check model availability and server configuration.';
       respond(status, {
         error: errorMsg,
+        ...(!isQuota && message ? { detail: message.slice(0, 400) } : {}),
         usageMetadata: error?.usageMetadata || error?.cause?.usageMetadata
       });
     } finally {
-      running = false;
+      inFlight--;
     }
   };
 }

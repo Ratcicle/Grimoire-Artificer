@@ -175,6 +175,15 @@ export const getLocalDNA = async (ownerId: string | null = captureDnaOperationCo
   return stored.filter(item => item.ownerId === ownerId).map(item => item.record);
 };
 
+/** One record by key. Hot paths use this: reading the full store copies every image. */
+export const getLocalDNAById = async (id: string, ownerId: string | null = captureDnaOperationContext().ownerId): Promise<VisualDNA | undefined> => {
+  const db = await initDB();
+  const name = storeName(ownerId);
+  const stored = await readRequest(db.transaction(name, 'readonly').objectStore(name).get(recordKey(ownerId, id)));
+  const record = unwrap(stored, ownerId);
+  return record && (ownerId === null ? record.ownerId == null : stored.ownerId === ownerId) ? record : undefined;
+};
+
 export const deleteLocalDNA = async (id: string, ownerId: string | null = captureDnaOperationContext().ownerId): Promise<void> => {
   const db = await initDB();
   assertDnaOperationContext({ ownerId });

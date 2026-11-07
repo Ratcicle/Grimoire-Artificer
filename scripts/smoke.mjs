@@ -29,7 +29,7 @@ try {
   await page.getByRole('button',{name:/Artstyle Database/}).click();
   await page.getByText(/Art DNA database is empty/).waitFor();
   // Tiny synthetic PNG fixture, used only for local input preparation.
-  await page.locator('input[type=file]').last().setInputFiles({name:'smoke.v1.png',mimeType:'image/png',buffer:Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l9sAAAAASUVORK5CYII=','base64')});
+  await page.locator('input[type=file][multiple]').setInputFiles({name:'smoke.v1.png',mimeType:'image/png',buffer:Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l9sAAAAASUVORK5CYII=','base64')});
   await page.getByRole('button',{name:'Analyze',exact:true}).waitFor();
   await page.getByRole('button',{name:'Grimoire',exact:true}).click();
   await page.getByRole('button',{name:/Artstyle Database/}).click();

@@ -26,9 +26,14 @@ import {
   validateAnalysisCompleteness,
   createVisualDNAPatch 
 } from "./visualTags";
-import { VISUAL_TAG_CATEGORIES, VISUAL_TAG_KEYWORDS } from "./visualTags";
-import { ARCHETYPE_DEFINITIONS } from "../constants";
-import { GRIMOIRE_SYSTEM_PROMPT } from "../constants";
+import { AFFINITY_ARCHETYPES, VISUAL_TAG_CATEGORIES } from "./visualTags";
+import { ARCHETYPE_DEFINITIONS, ARCHETYPE_STYLE_SUMMARIES, GRIMOIRE_SYSTEM_PROMPT } from "../constants";
+
+// A slow reasoning model can take minutes, but a hung request must not hold a queue slot forever.
+const ANALYSIS_TIMEOUT_MS = 5 * 60_000;
+
+const TRANSFERABLE = "Transferable technique for a different subject: never name the depicted subject, anatomy, garments, weapons, concrete materials, places or lore. Empty string if absent.";
+const SUBJECT_CATEGORIES = ["humanoid", "creature", "dragon", "undead", "machine", "object", "weapon", "environment", "architecture", "phenomenon"];
 
 
 
@@ -36,35 +41,35 @@ export const VISUAL_DNA_RESPONSE_SCHEMA = {
   type: Type.OBJECT,
   properties: {
     summary: { type: Type.STRING, description: "Dense visual summary of overall aesthetic and presentation." },
-    linework: { type: Type.STRING, description: "Concrete description of line quality: line weight variation, hard vs soft contours, contour color." },
-    rendering: { type: Type.STRING, description: "Concrete description of shading and volume: cell-shading vs gradient transitions, ambient occlusion, specular highlights." },
-    palette: { type: Type.STRING, description: "Concrete color logic: dominant hues, accents, light/shadow balance, color temperature." },
+    linework: { type: Type.STRING, description: `${TRANSFERABLE} Line quality: weight variation, taper, hard vs soft contours, contour color logic.` },
+    rendering: { type: Type.STRING, description: `${TRANSFERABLE} Shading and volume: cell-shading vs gradient transitions, edge control, occlusion, highlight treatment.` },
+    palette: { type: Type.STRING, description: "Concrete color description: dominant hues, accents, light/shadow balance, color temperature." },
     silhouette: { type: Type.STRING, description: "Overall shape readability, external contours, visual mass." },
-    pose: { type: Type.STRING, description: "Subject pose dynamics, gesture, motion lines, weight distribution." },
+    pose: { type: Type.STRING, description: `${TRANSFERABLE} Gesture: line of action, weight distribution, tension and rhythm of the focal subject.` },
     framing: { type: Type.STRING, description: "Camera distance, focal length, angle (e.g. low-angle worm's-eye, dutch angle)." },
     composition: { type: Type.STRING, description: "Visual flow, balance of masses, overlapping, leading lines, negative space." },
-    lighting: { type: Type.STRING, description: "Light direction, key light, fill light, rim lighting, specular glare." },
+    lighting: { type: Type.STRING, description: `${TRANSFERABLE} Light direction, key and fill relationship, rim light, contrast and falloff.` },
     effects: { type: Type.STRING, description: "Energy, particles, magical bursts, elemental phenomena, speed lines." },
     materials: { type: Type.STRING, description: "Visual cues used to convey materials with proper uncertainty (e.g. gold-like metallic sheen, translucent surface)." },
     details: { type: Type.STRING, description: "Where detail is concentrated (focal points) vs where it is simplified or quiet." },
-    background: { type: Type.STRING, description: "Environmental staging, atmospheric depth, horizon, or abstract background treatment." },
+    background: { type: Type.STRING, description: `${TRANSFERABLE} Background treatment: depth layers, value range, level of detail, degree of abstraction.` },
     hierarchy: { type: Type.STRING, description: "Focal hierarchy: what catches the eye first, second, third." },
     positivePrompt: { type: Type.STRING, description: "Descriptive scene summary capturing keywords for search indexing (not a universal style directive)." },
     negativePrompt: { type: Type.STRING, description: "Artifacts and flaws to avoid, without contradicting observed techniques." },
     visualMotifs: { type: Type.STRING, description: "General visual motifs and symbolic shapes (e.g. winged warrior, rotary weapon)." },
-    shapeLanguage: { type: Type.STRING, description: "Dominant geometric shape language (e.g. aggressive sharp angular chevrons, flowing organic curves)." },
-    focalAnchors: { type: Type.STRING, description: "Specific visual anchors guiding the viewer's gaze." },
-    detailPlacement: { type: Type.STRING, description: "Distribution of high-density micro-details vs quiet negative zones." },
-    compositionRecipe: { type: Type.STRING, description: "Reusable structural recipe (e.g. strong diagonal visual flow balanced by opposing mass)." },
-    paletteLogic: { type: Type.STRING, description: "Harmony rules (e.g. warm golden illumination contrasted with cool teal ambient shadows)." },
-    materialBehavior: { type: Type.STRING, description: "How materials react to light (e.g. hard-edged specular glints on polished metal, matte light dispersion on cloth)." },
-    energyDesign: { type: Type.STRING, description: "Shape and rhythm of energy particles or elemental manifestations." },
-    styleAnchors: { type: Type.STRING, description: "Reusable concrete artistic techniques (separated from subject identity)." },
+    shapeLanguage: { type: Type.STRING, description: `${TRANSFERABLE} Dominant geometric language (e.g. aggressive angular chevrons, flowing organic curves).` },
+    focalAnchors: { type: Type.STRING, description: `${TRANSFERABLE} How the gaze is guided to the focal point (contrast, saturation, detail, converging shapes).` },
+    detailPlacement: { type: Type.STRING, description: `${TRANSFERABLE} Distribution of high-density micro-details vs quiet zones.` },
+    compositionRecipe: { type: Type.STRING, description: `${TRANSFERABLE} Reusable structural recipe (e.g. strong diagonal flow balanced by an opposing mass).` },
+    paletteLogic: { type: Type.STRING, description: `${TRANSFERABLE} Color relationships without hue names: warm vs cool, saturation and value structure, accent discipline.` },
+    materialBehavior: { type: Type.STRING, description: `${TRANSFERABLE} How surface types react to light (e.g. hard-edged glints on reflective surfaces, soft dispersion on matte ones).` },
+    energyDesign: { type: Type.STRING, description: `${TRANSFERABLE} Shape, rhythm and density of glow or particle effects.` },
+    styleAnchors: { type: Type.STRING, description: `${TRANSFERABLE} The signature techniques of this art, separated by semicolons.` },
     avoidRules: { type: Type.STRING, description: "Avoidance guidelines that do not forbid observed techniques or universal absence." },
     stylePromptFragments: {
       type: Type.ARRAY,
       items: { type: Type.STRING },
-      description: "Reusable, concrete, self-contained artistic techniques without subject identity (e.g. 'variable-weight linework with finer contours in illuminated areas')."
+      description: `${TRANSFERABLE} 5 to 8 self-contained techniques of 4 to 14 words each (e.g. 'variable-weight linework with finer contours in illuminated areas').`
     },
     contentMotifs: {
       type: Type.ARRAY,
@@ -91,20 +96,17 @@ export const VISUAL_DNA_RESPONSE_SCHEMA = {
       items: { type: Type.STRING },
       description: "Content-specific identity traits to avoid when adapting to new subjects."
     },
-    analysisVersion: { type: Type.NUMBER },
-    analysisStatus: { type: Type.STRING, enum: ["complete", "partial", "legacy"] },
-    calibrationVersion: { type: Type.NUMBER },
-    isCalibrated: { type: Type.BOOLEAN },
-    clearFields: {
+    archetypeAffinity: {
       type: Type.ARRAY,
-      items: { type: Type.STRING },
-      description: "Optional list of analytical field names to clear from existing records during partial reanalysis."
+      maxItems: 3,
+      items: { type: Type.STRING, enum: AFFINITY_ARCHETYPES },
+      description: "Up to 3 archetypes whose visual style this art fits. Judge the style, not the subject. Empty when none fits well."
     },
     subjectProfile: {
       type: Type.OBJECT,
       properties: {
         primarySubject: { type: Type.STRING },
-        subjectCategory: { type: Type.STRING },
+        subjectCategory: { type: Type.STRING, enum: SUBJECT_CATEGORIES },
         visualRole: { type: Type.STRING }
       },
       required: ["primarySubject", "subjectCategory", "visualRole"]
@@ -145,7 +147,7 @@ export const VISUAL_DNA_RESPONSE_SCHEMA = {
         properties: {
           id: { type: Type.STRING },
           description: { type: Type.STRING },
-          category: { type: Type.STRING },
+          category: { type: Type.STRING, enum: SUBJECT_CATEGORIES },
           visualRole: { type: Type.STRING, enum: ["primary", "secondary", "supporting"] },
           physicalScale: { type: Type.STRING },
           perceivedPresence: { type: Type.STRING },
@@ -187,7 +189,8 @@ export const VISUAL_DNA_RESPONSE_SCHEMA = {
         silhouette: { type: Type.NUMBER, description: "Utility 0.0-1.0: clear guidance for silhouette readability and contour design." },
         rendering: { type: Type.NUMBER, description: "Utility 0.0-1.0: clear guidance for volume rendering, shading transitions, and edge control." },
         detailDensity: { type: Type.NUMBER, description: "Descriptor of visual detail density from 0.0 (minimal/flat) to 1.0 (hyper-dense micro-details). NOT utility or quality." }
-      }
+      },
+      required: ["style", "palette", "pose", "composition", "lighting", "effects", "materials", "background", "details", "silhouette", "rendering", "detailDensity"]
     },
     scoreJustifications: {
       type: Type.OBJECT,
@@ -206,7 +209,13 @@ export const VISUAL_DNA_RESPONSE_SCHEMA = {
         style: { type: Type.STRING }
       }
     }
-  }
+  },
+  required: [
+    "summary", "linework", "rendering", "palette", "pose", "lighting", "background", "shapeLanguage",
+    "focalAnchors", "detailPlacement", "compositionRecipe", "paletteLogic", "materialBehavior", "energyDesign",
+    "stylePromptFragments", "contentMotifs", "identitySpecificDetails", "universalQualityAvoids",
+    "styleSpecificAvoids", "archetypeAffinity", "subjectProfile", "tags", "scores"
+  ]
 };
 
 export interface GenerationResult {
@@ -470,16 +479,18 @@ export const analyzeReferenceImage = async (
     return `### Category: ${category}\n` + (tags as string[]).map(t => `- "${t}"`).join("\n");
   }).join("\n\n");
 
+  const archetypeList = Object.entries(ARCHETYPE_STYLE_SUMMARIES).map(([name, style]) => `- "${name}": ${style}`).join("\n");
+
   const analysisPrompt = `
 You are an expert digital art analyzer specializing in trading card game (TCG) illustrations with deep stylistic nuance across both dense Japanese OCG (Yu-Gi-Oh-like) digital styles and diverse illustrative aesthetics.
 Analyze the provided reference image and extract its stylistic "Visual DNA".
 Do NOT focus on character identity, logos, card frames, borders, text, or trademarks. Focus on abstract artistic design principles and concrete observable techniques so that we can replicate the visual finish in future generations of completely different subjects.
+Write every text value in English.
 
 ======================================================================
 1. UTILITY MATRIX CONTRACT & CALIBRATION RUBRIC (0.0 to 1.0)
 ======================================================================
-Utility scores define:
-"Quanto esta referência oferece evidência visual clara e orientação reutilizável para esta dimensão artística."
+A utility score answers: how much clear visual evidence and reusable guidance does this reference offer for this artistic dimension?
 
 They are NOT:
 - A score of beauty or overall quality of the image.
@@ -495,6 +506,8 @@ RUBRIC FOR UTILITY SCORES:
 - 0.90: Especially clear, well-supported, and exemplary contribution.
 - 1.0: Masterclass benchmark exemplar with explicit evidence.
 
+EXPECTED DISTRIBUTION: these scores decide which reference supplies each technique, so they only help if they differ. Across a large library most scores belong between 0.35 and 0.75, and an image is usually strong in a few dimensions and ordinary in the others. Reserve 0.9 and above for the rare dimension that truly stands out.
+
 CRITICAL CONTRACT RULES FOR SCORES:
 1. Every score MUST be a finite decimal number in the inclusive range [0.0, 1.0] (e.g. 0.0, 0.40, 0.75, 1.0). Both 0.0 and 1.0 are valid boundary values.
 2. NEVER output percentages or integers like 85, 90, or 100.
@@ -505,34 +518,45 @@ CRITICAL CONTRACT RULES FOR SCORES:
 7. In 'scoreJustifications', provide a concise 1-sentence explanation citing visible evidence for each evaluated dimension. Do NOT repeat generic praise like "high quality" or "highly detailed".
 
 ======================================================================
-2. SEPARATING TECHNIQUE FROM SUBJECT CONTENT
+2. TWO KINDS OF FIELDS: DESCRIPTION AND TRANSFERABLE TECHNIQUE
 ======================================================================
 Never confuse the subject depicted with the technique used to depict it!
-- 'subjectProfile' & 'subjects': Describe observed subjects and entities faithfully. Do NOT erase content to avoid transferring it.
+
+DESCRIPTION fields say what is in this image, faithfully. Do NOT erase content from them:
+summary, positivePrompt, palette, silhouette, framing, composition, effects, materials, details, hierarchy, visualMotifs, subjectProfile, subjects, contentMotifs, identitySpecificDetails.
 - 'contentMotifs': General conceptual motifs (e.g. 'winged humanoid', 'heavy rotary cannon', 'electrical discharge arcs'). These are conditional motifs, NOT universal style rules.
 - 'identitySpecificDetails': Specific unique configurations that must NOT be replicated on other subjects (e.g. 'specific avian crest on helm', 'cluster of cylindrical glowing vials', 'unique heraldic crest'). Do NOT classify generic words like 'metal', 'wings', 'blue', or 'armor' as forbidden identities.
-- 'stylePromptFragments' & 'styleAnchors': Reusable, concrete, self-contained artistic TECHNIQUES without subject identity.
-  Formulate reusable techniques such as:
-  - "variable-weight linework with finer contours in illuminated areas"
-  - "hard-edged metallic highlights with softer internal shadow gradients"
-  - "dense focal detail contrasted with quieter background shapes"
-  - "a strong diagonal visual flow balanced by a secondary opposing mass"
-  (Observe what is actually in the image; do not copy these exact examples unless visually present).
 - 'positivePrompt': A descriptive scene summary to aid semantic search indexing, NOT a universal style mandate.
+
+TRANSFERABLE TECHNIQUE fields will be pasted into the prompt of a NEW illustration of a completely different subject:
+linework, rendering, lighting, pose, background, shapeLanguage, focalAnchors, detailPlacement, compositionRecipe, paletteLogic, materialBehavior, energyDesign, styleAnchors, stylePromptFragments.
+Rules for every transferable field:
+- Never name the depicted subject, creature type, anatomy or body parts, garments, armor, weapons, concrete materials, places, or lore. Say "the focal subject", "reflective surfaces", "translucent forms", "the outer contour", "large sweeping curves".
+- Do not name hues. Describe color through relationships: warm vs cool, saturated vs muted, value contrast.
+- Write as guidance an illustrator could apply to anything: one sentence of at most 25 words, specific enough to tell this art apart from a generic anime illustration.
+- Use an empty string when the technique is absent from the image (for example, energyDesign in an art without glow or particles).
+
+Wrong -> Right:
+- "Hard-edged glints on the gold armor" -> "Hard-edged specular glints on reflective surfaces with soft falloff into matte areas"
+- "Wings sweep around the chest emblem" -> "Large sweeping curves frame and converge on the focal point"
+- "Blue fins glow against the golden sky" -> "Cool saturated accents set against a dominant warm high-key field"
+- "The dragon crouches on the left" -> "Compressed low stance with a strong diagonal line of action"
+- "Temple ruins fade into mist" -> "Background detail drops sharply with depth into pale atmospheric haze"
+
+Observe what is actually in the image; do not copy these examples unless visually present. Honor minimalist, flat, soft, or watercolor styles faithfully without forcing them to appear dense or hyper-rendered.
 
 ======================================================================
 3. CONCRETE OBSERVATIONS & PRESERVING UNCERTAINTY
 ======================================================================
-Provide concrete observations rather than generic fluff:
+Provide concrete observations rather than generic fluff such as "dynamic", "highly detailed" or "polished anime rendering":
 - Linework: thickness variation, hard vs soft edge transitions, contour coloring.
 - Rendering: volume handling, shadow transitions, ambient occlusion, specular highlights.
 - Lighting: apparent light direction, key light, rim lights, reflections, backlight.
 - Composition: visual flow, overlapping planes, focal masses, negative space.
 - Detail: where detail is concentrated (focal points) vs where it is subdued or quiet.
-- Materials: visual cues used to convey materials. Preserve uncertainty: use "metal de aparência dourada" instead of assuming "ouro", "superfície translúcida" instead of assuming "vidro", "placas com formato de penas" instead of assuming "penas orgânicas", "estrutura aparentemente mecânica" instead of lore-based mechanisms.
+- Materials: visual cues used to convey materials. Preserve uncertainty: use "gold-colored metal" instead of assuming "gold", "translucent surface" instead of assuming "glass", "feather-shaped plates" instead of assuming "organic feathers", "apparently mechanical structure" instead of lore-based mechanisms.
 - Effects: shape, rhythm, distribution, and contrast of particles or magical auras.
 - Palette: dominant colors, secondary accents, light/shadow temperatures.
-- Art style neutrality: Honor minimalist, flat, soft, or watercolor styles faithfully without forcing them to appear dense or hyper-rendered.
 
 ======================================================================
 4. NEGATIVE RULES (AVOIDS)
@@ -580,11 +604,16 @@ RECOMMENDED LIMITS PER CATEGORY:
 - Overall Total Max: 14 tags
 
 ======================================================================
-6. PARTIAL REANALYSIS & FIELD INTENT
+6. ARCHETYPE AFFINITY
 ======================================================================
-- Omit fields that are not evaluated or uncertain;
-- Return [] when an array field was evaluated and contains zero items (empty list);
-- If an optional analytical description previously present should be explicitly removed, list its field name in 'clearFields' (e.g. ['energyDesign']).
+'archetypeAffinity' lists up to 3 of these game archetypes whose VISUAL STYLE this art could teach. Judge rendering, light, palette structure and finish, never the subject: a knight drawn in gritty soot and ember light fits "Burning West" even without any western theme. Return [] when none fits well.
+
+${archetypeList}
+
+======================================================================
+7. COMPLETENESS
+======================================================================
+This is a full analysis: evaluate every field. Use "" for a technique absent from the image and [] for a list with no items.
 
 CRITICAL: Return ONLY valid JSON. Do NOT wrap in markdown code blocks like \`\`\`json \`\`\`. Start directly with { and end with }. Make sure everything is escaped properly.
   `;
@@ -604,7 +633,8 @@ CRITICAL: Return ONLY valid JSON. Do NOT wrap in markdown code blocks like \`\`\
     },
     config: {
       responseMimeType: "application/json",
-      responseSchema: VISUAL_DNA_RESPONSE_SCHEMA
+      responseSchema: VISUAL_DNA_RESPONSE_SCHEMA,
+      abortSignal: AbortSignal.timeout(ANALYSIS_TIMEOUT_MS)
     }
   });
 

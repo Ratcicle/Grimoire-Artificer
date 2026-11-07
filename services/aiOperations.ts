@@ -1,7 +1,10 @@
 import { CardGenerationRequest, TokenUsageLog, VisualDNA } from '../types';
 import { generateCardArt, analyzeReferenceImage, extractUsageFromError, mapUsageMetadata } from './geminiService';
 import { resolveAccessPolicy, validateModelAccess } from './accessPolicy';
-import { getLocalDNA, saveTokenLog } from './localDbService';
+import { getLocalDNAById, saveTokenLog } from './localDbService';
+import { classifyAnalysisFailure, type AnalysisFailureKind } from './analysisBatch';
+import { isThumbnailImage } from './imagePreparation';
+import { ALLOWED_VISUAL_TAGS } from './visualDnaContracts';
 import { saveDNA } from './cloudDnaService';
 import { captureDnaOperationContext, assertDnaOperationContext, type DnaOperationContext } from './dnaAccountContext';
 import { createVisualDNAFromAnalysis, mergeVisualDNASafe } from './visualDnaMerge';
@@ -17,7 +20,7 @@ async function recordUsage(log: TokenUsageLog) {
   try { await saveTokenLog(log); }
   catch { console.warn('Token usage could not be saved. The operation result is preserved.'); }
 }
-type Failed = { status: 'failed'; error: string };
+type Failed = { status: 'failed'; error: string; kind?: AnalysisFailureKind; retryAfterMs?: number };
 type Busy = { status: 'busy' };
 
 export async function runGeneration(request: CardGenerationRequest): Promise<Busy | Failed | {status:'done'; result: Awaited<ReturnType<typeof generateCardArt>>}> {
@@ -48,8 +51,22 @@ export async function runGeneration(request: CardGenerationRequest): Promise<Bus
   }
 }
 
+/** The art is the same but the analysis is new: nothing from the old text may linger. */
+function rebuildFromNewImage(current: VisualDNA, imageUrl: string, result: Awaited<ReturnType<typeof analyzeReferenceImage>>): VisualDNA {
+  const rebuilt = createVisualDNAFromAnalysis({id:current.id,name:current.name,imageUrl,createdAt:current.createdAt,updatedAt:current.updatedAt,revision:current.revision}, result.data, result.patch);
+  const customTags = (current.tags || []).filter(tag => !ALLOWED_VISUAL_TAGS.includes(tag));
+  return {
+    ...rebuilt,
+    tags: [...new Set([...(rebuilt.tags || []), ...customTags])],
+    ...(current.ownerId !== undefined ? {ownerId:current.ownerId} : {}),
+    ...(current.cloudDocumentId ? {cloudDocumentId:current.cloudDocumentId} : {}),
+  };
+}
+
 export interface ReferenceAnalysisRequest {
   id: string; name: string; imageUrl: string; model: string; reanalyze?: boolean; sessionId?: string; context?: DnaOperationContext;
+  /** Analyze imageUrl and store it in the existing record, replacing its image and previous analysis. */
+  replaceImage?: boolean;
 }
 export type ReferenceAnalysisOutcome = Busy | Failed | {status:'deleted'} | {status:'conflict'} | {status:'done';record:VisualDNA;changed:boolean};
 export async function runReferenceAnalysis(request: ReferenceAnalysisRequest): Promise<ReferenceAnalysisOutcome> {
@@ -61,12 +78,14 @@ export async function runReferenceAnalysis(request: ReferenceAnalysisRequest): P
   let isReanalysis = !!request.reanalyze;
   try {
     assertDnaOperationContext(context);
-    const list = await getLocalDNA(context.ownerId);
+    const existing = await getLocalDNAById(request.id, context.ownerId);
     assertDnaOperationContext(context);
-    const existing = list.find(d => d.id === request.id);
     isReanalysis ||= !!existing;
     if (request.reanalyze && !existing) return {status:'deleted'};
     const snapshot: VisualDNA | null = existing ? structuredClone(existing) : null;
+    if (snapshot && !request.replaceImage && isThumbnailImage(snapshot.imageUrl)) {
+      return {status:'failed',kind:'permanent',error:'Esta referência só tem a miniatura da nuvem. Importe o arquivo original com o mesmo nome para reanalisá-la.'};
+    }
     let lockedMode: any;
     try {
       const policy = await resolveAccessPolicy();
@@ -74,18 +93,22 @@ export async function runReferenceAnalysis(request: ReferenceAnalysisRequest): P
     } catch {
       // ignore
     }
-    const result = await analyzeReferenceImage(snapshot?.imageUrl || request.imageUrl, snapshot?.name || request.name, request.model, (attempted = true) => {called=attempted;}, lockedMode);
+    const result = await analyzeReferenceImage((request.replaceImage ? request.imageUrl : snapshot?.imageUrl) || request.imageUrl, snapshot?.name || request.name, request.model, (attempted = true) => {called=attempted;}, lockedMode);
     usage = result.usageMetadata;
     assertDnaOperationContext(context);
-    const current = (await getLocalDNA(context.ownerId)).find(d => d.id === request.id);
+    const current = await getLocalDNAById(request.id, context.ownerId);
     assertDnaOperationContext(context);
     if (snapshot && !current) {errorMessage='Reference deleted during analysis';return {status:'deleted'};}
     if ((snapshot && JSON.stringify(canonicalizeValue(snapshot)) !== JSON.stringify(canonicalizeValue(current))) || (!snapshot && current)) {
       errorMessage='Reference changed during analysis';return {status:'conflict'};
     }
-    const merged = snapshot
-      ? mergeVisualDNASafe(current!, result.patch || result.data)
-      : {data:createVisualDNAFromAnalysis({id:request.id,name:request.name,imageUrl:request.imageUrl}, result.data, result.patch),changed:true};
+    const merged = !snapshot
+      ? {data:createVisualDNAFromAnalysis({id:request.id,name:request.name,imageUrl:request.imageUrl}, result.data, result.patch),changed:true}
+      : request.replaceImage
+        ? {data:rebuildFromNewImage(current!, request.imageUrl, result),changed:true}
+        : mergeVisualDNASafe(current!, result.patch || result.data);
+    // The merge never touches this protected marker, so it is set for the analysis just merged.
+    if (snapshot && !request.replaceImage && merged.changed && result.data.analysisVersion) merged.data.analysisVersion = result.data.analysisVersion;
     const record = merged.changed ? await saveDNA(merged.data, {context,expected:snapshot}) : current!;
     assertDnaOperationContext(context);
     success = true;
@@ -93,7 +116,7 @@ export async function runReferenceAnalysis(request: ReferenceAnalysisRequest): P
   } catch (error) {
     usage ??= extractUsageFromError(error);
     errorMessage = error instanceof Error ? error.message : String(error);
-    return {status:'failed',error:errorMessage};
+    return {status:'failed',error:errorMessage,...classifyAnalysisFailure(error)};
   } finally {
     try {
       if(called) await recordUsage({id:crypto.randomUUID(),timestamp:Date.now(),operationType:request.sessionId?'analyze_all':isReanalysis?'reanalyze_image':'analyze_image',
