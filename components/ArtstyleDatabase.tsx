@@ -15,6 +15,8 @@ import {
 import { getLocalDNA } from "../services/localDbService";
 import { runReferenceAnalysis, isReferenceAnalyzing } from "../services/aiOperations";
 import { isThumbnailImage, prepareReferenceFiles } from "../services/imagePreparation";
+import { activeProvider, ANALYSIS_MODELS, analysisLabel, analysisProviderOf, hasCurrentAnalysisFrom, isClaudeModel, storedProvider, switchAnalysis } from "../services/analysisSlots";
+import { clearClaudeApiKey, getClaudeApiKey, setClaudeApiKey } from "../services/claudeAnalysis";
 import { runAnalysisBatch, type BatchItemResult, type BatchSummary } from "../services/analysisBatch";
 import { subscribeDnaChanges, suspendDnaNotifications, captureDnaOperationContext, isDnaOperationContextCurrent, notifyDnaChanges, type DnaOperationContext } from "../services/dnaAccountContext";
 import { compressImage } from "../services/imageUtils";
@@ -29,7 +31,7 @@ import {
   Database, Upload, Trash2, Edit2, Search, RefreshCw, BarChart3, Tag,
   FileText, Check, AlertCircle, Sparkles, Sliders, ChevronDown, ChevronUp,
   Image as ImageIcon, CheckCircle2, Eye, EyeOff, Save, X, Plus, Cloud, LogOut,
-  Download, AlertTriangle, ArrowDownAZ, CalendarClock
+  Download, AlertTriangle, ArrowDownAZ, ArrowLeftRight, CalendarClock
 } from "lucide-react";
 
 import { 
@@ -37,7 +39,6 @@ import {
   ALLOWED_VISUAL_TAGS, 
   VISUAL_TAG_KEYWORDS, 
   isCalibratedRecord,
-  hasTransferableAnalysis,
   getUtilityMatrixPresentationRows 
 } from "../services/visualTags";
 
@@ -47,6 +48,8 @@ const QUEUE_ROW_LIMIT = 40;
 const PILOT_SIZE = 5;
 const QUEUE_DISPLAY_ORDER = { analyzing: 0, failed: 1, pending: 2, done: 3 };
 const LIBRARY_SORT_KEY = 'grimoire_library_sort';
+const ANALYSIS_MODEL_KEY = 'grimoire_analysis_model';
+const CLAUDE_KEY_MISSING = 'Informe a chave da API do Claude.';
 const NAME_ORDER = new Intl.Collator(undefined, { sensitivity: 'base', numeric: true });
 const lastChanged = (item: VisualDNA) => item.updatedAt ?? item.createdAt ?? 0;
 
@@ -73,7 +76,12 @@ const ArtstyleDatabase: React.FC = () => {
   const [selectedTag, setSelectedTag] = useState<string | null>(null);
   const [selectedDna, setSelectedDna] = useState<VisualDNA | null>(null);
   const [isEditing, setIsEditing] = useState<boolean>(false);
-  const [analysisModel, setAnalysisModel] = useState<string>("gemini-4-argon");
+  const [analysisModel, setAnalysisModel] = useState<string>(() => {
+    const saved = localStorage.getItem(ANALYSIS_MODEL_KEY);
+    return ANALYSIS_MODELS.some(model => model.id === saved) ? saved! : ANALYSIS_MODELS[0].id;
+  });
+  const [claudeKeySaved, setClaudeKeySaved] = useState<boolean>(() => !!getClaudeApiKey());
+  const [claudeKeyInput, setClaudeKeyInput] = useState<string>("");
   
   // Tag Filter States
   const [collapsedCategories, setCollapsedCategories] = useState<Record<string, boolean>>({});
@@ -257,7 +265,8 @@ const ArtstyleDatabase: React.FC = () => {
       const result = await prepareReferenceFiles(files, reserved, file => compressImage(file, 800, 800, 0.8), {
         existing: {
           byName,
-          isCurrent: record => hasTransferableAnalysis(record) && !isThumbnailImage(record.imageUrl),
+          // A record analyzed by the other provider still needs this one's analysis.
+          isCurrent: record => hasCurrentAnalysisFrom(record, analysisProviderOf(analysisModel)) && !isThumbnailImage(record.imageUrl),
           imageOwners: new Map(existing.filter(record => record.imageFingerprint).map(record => [record.imageFingerprint!, record.name])),
         },
         onProgress: (done, total) => setPrepareProgress({ done, total }),
@@ -443,6 +452,7 @@ const ArtstyleDatabase: React.FC = () => {
     if (isProcessingQueueRef.current) return;
     const candidates = uploadQueueRef.current.filter(i => i.status === 'pending' || i.status === 'failed').map(i => i.id);
     if (candidates.length === 0) return;
+    if (isClaudeModel(analysisModel) && !claudeKeySaved) { setSyncStatusMsg(CLAUDE_KEY_MISSING); return; }
 
     isProcessingQueueRef.current = true;
     stopBatchRef.current = false;
@@ -515,6 +525,7 @@ const ArtstyleDatabase: React.FC = () => {
       setSyncStatusMsg('Só há miniatura desta referência. Importe o original para reanalisar.');
       return;
     }
+    if (isClaudeModel(analysisModel) && !claudeKeySaved) { setSyncStatusMsg(CLAUDE_KEY_MISSING); return; }
     if (reanalyzingConfirmId !== dna.id) {
       setReanalyzingConfirmId(dna.id);
       setTimeout(() => setReanalyzingConfirmId(current => current === dna.id ? null : current), 3000);
@@ -525,6 +536,38 @@ const ArtstyleDatabase: React.FC = () => {
     setReanalyzingIds(prev => new Set(prev).add(dna.id));
     try { await startAnalysis(dna.id); }
     finally { setReanalyzingIds(prev => {const next=new Set(prev);next.delete(dna.id);return next;}); }
+  };
+
+  const handleSwitchAnalysis = async (dna: VisualDNA) => {
+    const provider = storedProvider(dna);
+    const context = captureDnaOperationContext();
+    if (!provider) return;
+    try {
+      const persisted = await saveDNA(switchAnalysis(dna, provider), { expected: dna, context });
+      if (!isDnaOperationContextCurrent(context)) return;
+      setSelectedDna(persisted);
+      setDnaList(list => list.map(item => item.id === dna.id ? persisted : item));
+    } catch (err) {
+      setSyncStatusMsg(err instanceof Error ? err.message : 'Falha ao trocar de análise.');
+    }
+  };
+
+  const handleModelChange = (model: string) => {
+    setAnalysisModel(model);
+    localStorage.setItem(ANALYSIS_MODEL_KEY, model);
+  };
+
+  const handleSaveClaudeKey = (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!claudeKeyInput.trim()) return;
+    setClaudeApiKey(claudeKeyInput);
+    setClaudeKeyInput("");
+    setClaudeKeySaved(true);
+  };
+
+  const handleRemoveClaudeKey = () => {
+    clearClaudeApiKey();
+    setClaudeKeySaved(false);
   };
 
   const handleEditClick = () => {
@@ -858,14 +901,43 @@ const ArtstyleDatabase: React.FC = () => {
               <div className="flex items-center justify-between h-9 gap-1.5 bg-stone-950/60 border border-stone-800/80 px-3 rounded-lg text-stone-400 select-none w-full">
                 <span className="text-[9px] font-bold uppercase tracking-widest text-stone-500 whitespace-nowrap">AI Model:</span>
                 <select
+                  aria-label="Modelo de análise"
                   value={analysisModel}
-                  onChange={(e) => setAnalysisModel(e.target.value)}
+                  onChange={(e) => handleModelChange(e.target.value)}
                   className="bg-transparent text-[10px] font-bold text-amber-500 focus:outline-none cursor-pointer uppercase tracking-wider border-none p-0 pr-1 h-full text-right"
                 >
-                  <option value="gemini-4-argon" className="bg-stone-950 text-stone-300">Gemini 4 Argon</option>
-                  <option value="gemini-3.8-flash" className="bg-stone-950 text-stone-300">Gemini 3.8 Flash</option>
+                  {ANALYSIS_MODELS.map(model => (
+                    <option key={model.id} value={model.id} className="bg-stone-950 text-stone-300">{model.label}</option>
+                  ))}
                 </select>
               </div>
+              {isClaudeModel(analysisModel) && (claudeKeySaved ? (
+                <button
+                  type="button"
+                  onClick={handleRemoveClaudeKey}
+                  className="text-[8px] text-stone-500 hover:text-stone-300 uppercase tracking-widest text-center py-0.5 hover:underline cursor-pointer"
+                >
+                  Remover chave do Claude
+                </button>
+              ) : (
+                <form onSubmit={handleSaveClaudeKey} className="flex gap-1.5">
+                  <input
+                    type="password"
+                    aria-label="Chave da API do Claude"
+                    placeholder="Chave da API do Claude"
+                    autoComplete="off"
+                    value={claudeKeyInput}
+                    onChange={(e) => setClaudeKeyInput(e.target.value)}
+                    className="min-w-0 flex-1 bg-stone-950/60 border border-stone-800/80 rounded-lg px-2.5 h-8 text-[10px] text-stone-300 placeholder-stone-600 focus:outline-none focus:border-amber-600"
+                  />
+                  <button
+                    type="submit"
+                    className="shrink-0 px-2.5 h-8 bg-stone-900 hover:bg-stone-850 text-stone-300 hover:text-white border border-stone-800 text-[9px] font-bold uppercase tracking-wider rounded-lg transition-all cursor-pointer"
+                  >
+                    Salvar
+                  </button>
+                </form>
+              ))}
               <button
                 onClick={() => fileInputRef.current?.click()}
                 className="w-full flex items-center justify-center gap-2 h-9 px-4 bg-amber-600 hover:bg-amber-500 text-white text-[10px] font-bold uppercase tracking-wider rounded-lg transition-all shadow-md shadow-amber-950/20 whitespace-nowrap cursor-pointer"
@@ -1299,8 +1371,18 @@ const ArtstyleDatabase: React.FC = () => {
               <div className="absolute top-3 right-3 flex gap-1.5 z-30">
                 {!isEditing ? (
                   <>
-                    <button 
-                      onClick={handleEditClick} 
+                    {storedProvider(selectedDna) && (
+                      <button
+                        onClick={() => handleSwitchAnalysis(selectedDna)}
+                        disabled={reanalyzingIds.has(selectedDna.id)}
+                        className="p-2 rounded-md bg-stone-950/90 text-stone-300 hover:text-amber-500 hover:bg-stone-900 transition-all border border-stone-800 shadow-md cursor-pointer"
+                        title={`Trocar para a análise de ${analysisLabel(selectedDna.storedAnalyses![storedProvider(selectedDna)!]!)}`}
+                      >
+                        <ArrowLeftRight size={12} />
+                      </button>
+                    )}
+                    <button
+                      onClick={handleEditClick}  
                       className="p-2 rounded-md bg-stone-950/90 text-stone-300 hover:text-amber-500 hover:bg-stone-900 transition-all border border-stone-800 shadow-md cursor-pointer"
                       title="Edit memory details"
                     >
@@ -1321,7 +1403,7 @@ const ArtstyleDatabase: React.FC = () => {
                           ? "Reanalisando estilo..." 
                           : reanalyzingConfirmId === selectedDna.id 
                             ? "Click again to confirm reanalysis" 
-                            : "Re-run Gemini analysis"
+                            : `Reanalisar com ${ANALYSIS_MODELS.find(model => model.id === analysisModel)?.label ?? analysisModel}`
                       }
                     >
                       <RefreshCw size={12} className={reanalyzingIds.has(selectedDna.id) || reanalyzingConfirmId === selectedDna.id ? "animate-spin" : ""} />
@@ -1368,6 +1450,9 @@ const ArtstyleDatabase: React.FC = () => {
                         Legacy Engine
                       </span>
                     )}
+                    <span className="px-1.5 py-0.5 bg-stone-950 text-stone-300 border border-stone-800 text-[8px] font-bold font-mono uppercase rounded tracking-wider">
+                      {analysisLabel(selectedDna)}
+                    </span>
                     {isThumbnailImage(selectedDna.imageUrl) && (
                       <span className="px-1.5 py-0.5 bg-amber-950/80 text-amber-300 border border-amber-800/40 text-[8px] font-bold font-mono uppercase rounded tracking-wider">
                         Miniatura

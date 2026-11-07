@@ -1,4 +1,6 @@
 import { createGeminiClient, hasHostRuntimeCredential } from "./geminiTransport";
+import { isClaudeModel } from "./analysisSlots";
+import { requestClaudeAnalysis } from "./claudeAnalysis";
 import { AccessMode, AccessPolicyState, resolveAccessPolicy, validateModelAccess } from "./accessPolicy";
 export type { AccessMode, AccessPolicyState };
 export { resolveAccessPolicy, validateModelAccess };
@@ -461,9 +463,7 @@ export const analyzeReferenceImage = async (
   modelName: string = "gemini-4-argon",
   onRequest?: (attempted?: boolean) => void,
   lockedMode?: AccessMode
-): Promise<{ data: Partial<VisualDNA>; patch?: VisualDNAPatch; usageMetadata?: any }> => {
-  const ai = createGeminiClient(onRequest, lockedMode);
-  
+): Promise<{ data: Partial<VisualDNA>; patch?: VisualDNAPatch; usageMetadata?: any; servedModel?: string }> => {
   let base64Data = base64Image;
   let mimeType = 'image/png';
   
@@ -618,28 +618,31 @@ This is a full analysis: evaluate every field. Use "" for a technique absent fro
 CRITICAL: Return ONLY valid JSON. Do NOT wrap in markdown code blocks like \`\`\`json \`\`\`. Start directly with { and end with }. Make sure everything is escaped properly.
   `;
 
-  const response = await ai.models.generateContent({
-    model: modelName,
-    contents: {
-      parts: [
-        {
-          inlineData: {
-            data: base64Data,
-            mimeType: mimeType
-          }
+  const abortSignal = AbortSignal.timeout(ANALYSIS_TIMEOUT_MS);
+  const response: { text?: string; usageMetadata?: any; servedModel?: string } = isClaudeModel(modelName)
+    ? await requestClaudeAnalysis({ model: modelName, prompt: analysisPrompt, schema: VISUAL_DNA_RESPONSE_SCHEMA, imageBase64: base64Data, mimeType, signal: abortSignal, onRequest })
+    : await createGeminiClient(onRequest, lockedMode).models.generateContent({
+        model: modelName,
+        contents: {
+          parts: [
+            {
+              inlineData: {
+                data: base64Data,
+                mimeType: mimeType
+              }
+            },
+            { text: analysisPrompt }
+          ]
         },
-        { text: analysisPrompt }
-      ]
-    },
-    config: {
-      responseMimeType: "application/json",
-      responseSchema: VISUAL_DNA_RESPONSE_SCHEMA,
-      abortSignal: AbortSignal.timeout(ANALYSIS_TIMEOUT_MS)
-    }
-  });
+        config: {
+          responseMimeType: "application/json",
+          responseSchema: VISUAL_DNA_RESPONSE_SCHEMA,
+          abortSignal
+        }
+      });
 
   if (!response.text) {
-    throw new GeminiOperationError("Failed to receive analysis from Gemini.", response.usageMetadata, "Analyze Reference Image");
+    throw new GeminiOperationError("Failed to receive the analysis from the model.", response.usageMetadata, "Analyze Reference Image");
   }
 
   try {
@@ -679,7 +682,7 @@ CRITICAL: Return ONLY valid JSON. Do NOT wrap in markdown code blocks like \`\`\
     // 5. Construct patch preserving raw presence alongside normalized representation
     const patch = createVisualDNAPatch(parsedRaw, parsed);
 
-    return { data: parsed, patch, usageMetadata: response.usageMetadata };
+    return { data: parsed, patch, usageMetadata: response.usageMetadata, servedModel: response.servedModel };
   } catch (err) {
     if (err instanceof GeminiOperationError) {
       throw err;

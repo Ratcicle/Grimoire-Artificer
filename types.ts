@@ -133,6 +133,14 @@ export interface TokenUsageLog {
   durationMs?: number;
 }
 
+export type AnalysisProvider = 'gemini' | 'claude';
+
+/** An analysis set aside on a record: everything except its identity and sync data. */
+export type StoredAnalysis = Partial<Omit<VisualDNA,
+  'id' | 'name' | 'imageUrl' | 'ownerId' | 'createdAt' | 'updatedAt' | 'revision' |
+  'imageFingerprint' | 'cloudDocumentId' | 'usageMetadata' | 'storedAnalyses'
+>>;
+
 export interface VisualDNA {
   id: string;
   name: string;
@@ -183,6 +191,11 @@ export interface VisualDNA {
   contentSpecificAvoids?: string[];
   /** Shadow Duel archetypes this art's style fits, judged apart from its subject. */
   archetypeAffinity?: string[];
+  /** Who wrote the analysis in these fields, which is the one the generator reads. */
+  analysisProvider?: AnalysisProvider;
+  analysisModel?: string;
+  /** The other provider's analysis, kept for switching back. */
+  storedAnalyses?: Partial<Record<AnalysisProvider, StoredAnalysis>>;
   analysisStatus?: "complete" | "partial" | "legacy";
   warnings?: string[];
   usageMetadata?: any;

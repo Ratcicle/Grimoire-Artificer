@@ -106,6 +106,31 @@ describe('Backup and Restoration Service', () => {
     expect(restoredList[0].isCalibrated).toBe(true);
   });
 
+  it('1b. backup preserva as duas análises e recusa campo desconhecido dentro delas', async () => {
+    setDnaOwnerProvider(() => 'user-123');
+    const both: VisualDNA = {
+      ...sampleDna1, analysisVersion: 4, analysisProvider: 'claude', analysisModel: 'claude-sonnet-5-5',
+      storedAnalyses: { gemini: { summary: 'A Gemini reading', rendering: 'Soft bands', tags: ['Crisp Line Quality'], scores: { style: 0.4 }, analysisVersion: 4, analysisProvider: 'gemini', analysisModel: 'gemini-4-argon' } },
+    };
+    await saveLocalDNA(both, 'user-123', null, false);
+    const text = JSON.stringify(await exportLibraryBackup('user-123'));
+
+    closeLocalDatabase();
+    memory = createIndexedDbMock();
+    vi.stubGlobal('indexedDB', memory.indexedDB);
+
+    const preview = await validateAndPreviewBackup(text, 'user-123');
+    expect(preview.valid).toBe(true);
+    await applyBackupRestoration(preview);
+    const [restored] = await getLocalDNA('user-123');
+    expect(restored).toMatchObject({ analysisProvider: 'claude', analysisModel: 'claude-sonnet-5-5' });
+    expect(restored.storedAnalyses).toEqual(both.storedAnalyses);
+
+    const tampered = JSON.parse(text);
+    tampered.records[0].storedAnalyses.gemini.apiKey = 'x';
+    expect((await validateAndPreviewBackup(JSON.stringify(tampered), 'user-123')).valid).toBe(false);
+  });
+
   it('2. registros legados e calibrados mantêm sua procedência', async () => {
     setDnaOwnerProvider(() => null);
     await saveLocalDNA(sampleDna1, null, null, false);

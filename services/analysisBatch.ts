@@ -17,10 +17,13 @@ const retryHint = (message: string): number | undefined => {
 export function classifyAnalysisFailure(error: unknown): AnalysisFailure {
   const { status, name, message: rawMessage } = (error ?? {}) as { status?: unknown; name?: unknown; message?: unknown };
   const message = String(rawMessage ?? error ?? '');
+  // Waiting does not refill credit or lift a spend limit, whichever status reports them.
+  if (/credit balance|usage limits/i.test(message)) return { kind: 'quota_exhausted' };
   if (status === 429 || /\b429\b|resource.?exhausted|rate.?limit|too many requests|\bquota\b/i.test(message)) {
     // Waiting cannot recover a daily quota or an empty billing balance.
     if (/per.?day|daily|billing|prepa(?:y|id)|credits?\b/i.test(message)) return { kind: 'quota_exhausted' };
-    return { kind: 'rate_limit', retryAfterMs: retryHint(message) };
+    const header = (error as { headers?: { get?: (name: string) => string | null } })?.headers?.get?.('retry-after');
+    return { kind: 'rate_limit', retryAfterMs: header && Number(header) > 0 ? Number(header) * 1000 : retryHint(message) };
   }
   if (name === 'AbortError' || name === 'TimeoutError') return { kind: 'transient' };
   if (status === 409 || (typeof status === 'number' && status >= 500)) return { kind: 'transient' };

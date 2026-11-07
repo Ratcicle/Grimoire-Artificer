@@ -84,6 +84,52 @@ describe('real operation orchestration',()=>{
     expect(saved.tags).toEqual(['dragon','my custom tag']);expect(saved).not.toHaveProperty('energyDesign');
     expect(options.expected).toEqual(current);
   });
+  describe('one analysis per provider',()=>{
+    const gemini={...dna,imageUrl:'art',summary:'gemini text',energyDesign:'gemini only',tags:['boss monster','my custom tag'],analysisVersion:4,analysisProvider:'gemini',analysisModel:'gemini-4-argon',createdAt:5,revision:3,cloudDocumentId:'doc',ownerId:'A'} as VisualDNA;
+    const answered=(servedModel?:string)=>mocks.analyze.mockImplementation(async(_i,_n,_m,started)=>{started();return {data:{analysisVersion:4},usageMetadata,servedModel};});
+    const claudeText=(imageUrl='art')=>mocks.create.mockReturnValue({id:'a',name:'A',imageUrl,summary:'claude text',tags:['dragon'],scores:{}});
+    it('another provider sets the active analysis aside instead of merging into it',async()=>{
+      mocks.read.mockResolvedValue([gemini]);claudeText();answered('claude-sonnet-5-5');
+      const outcome=await runReferenceAnalysis({id:'a',name:'A',imageUrl:'ignored',model:'claude-sonnet-5-5',reanalyze:true});
+      expect(outcome.status).toBe('done');expect(mocks.merge).not.toHaveBeenCalled();expect(mocks.analyze.mock.calls[0][0]).toBe('art');
+      const [saved,options]=mocks.save.mock.calls[0];
+      expect(saved).toMatchObject({imageUrl:'art',summary:'claude text',analysisProvider:'claude',analysisModel:'claude-sonnet-5-5',analysisVersion:4,cloudDocumentId:'doc',ownerId:'A'});
+      expect(saved).not.toHaveProperty('energyDesign');expect(saved.tags).toEqual(['dragon','my custom tag']);
+      expect(saved.storedAnalyses.gemini).toMatchObject({summary:'gemini text',energyDesign:'gemini only',analysisProvider:'gemini',analysisModel:'gemini-4-argon'});
+      expect(saved.storedAnalyses.gemini).not.toHaveProperty('imageUrl');expect(options.expected).toEqual(gemini);
+    });
+    it('the record names the model that really answered when a fallback served it',async()=>{
+      mocks.read.mockResolvedValue([gemini]);claudeText();answered('claude-sonnet-5');
+      await runReferenceAnalysis({id:'a',name:'A',imageUrl:'ignored',model:'claude-sonnet-5-5',reanalyze:true});
+      expect(mocks.save.mock.calls[0][0]).toMatchObject({analysisProvider:'claude',analysisModel:'claude-sonnet-5'});
+    });
+    it('the same provider merges and leaves the other analysis alone',async()=>{
+      const both={...gemini,summary:'claude text',analysisProvider:'claude',analysisModel:'claude-sonnet-5-5',storedAnalyses:{gemini:{summary:'gemini text',analysisVersion:4}}} as VisualDNA;
+      mocks.read.mockResolvedValue([both]);mocks.merge.mockReturnValue({data:{...both,summary:'newer claude text'},changed:true});answered('claude-opus-5-5');
+      await runReferenceAnalysis({id:'a',name:'A',imageUrl:'ignored',model:'claude-opus-5-5',reanalyze:true});
+      expect(mocks.merge).toHaveBeenCalledTimes(1);
+      expect(mocks.save.mock.calls[0][0]).toMatchObject({summary:'newer claude text',analysisModel:'claude-opus-5-5',storedAnalyses:{gemini:{summary:'gemini text'}}});
+    });
+    it('a new file keeps the other provider and replaces its own',async()=>{
+      const both={...gemini,summary:'claude text',analysisProvider:'claude',analysisModel:'claude-sonnet-5-5',storedAnalyses:{gemini:{summary:'gemini text',analysisVersion:4}}} as VisualDNA;
+      mocks.read.mockResolvedValue([both]);claudeText('new-image');answered('claude-sonnet-5-5');
+      await runReferenceAnalysis({id:'a',name:'A',imageUrl:'new-image',model:'claude-sonnet-5-5',reanalyze:true,replaceImage:true});
+      const [saved]=mocks.save.mock.calls[0];
+      expect(saved).toMatchObject({imageUrl:'new-image',summary:'claude text',storedAnalyses:{gemini:{summary:'gemini text'}}});
+      expect(saved.storedAnalyses).not.toHaveProperty('claude');
+    });
+    it('importing a file with another provider sets the active analysis aside',async()=>{
+      mocks.read.mockResolvedValue([gemini]);claudeText('new-image');answered('claude-sonnet-5-5');
+      await runReferenceAnalysis({id:'a',name:'A',imageUrl:'new-image',model:'claude-sonnet-5-5',reanalyze:true,replaceImage:true});
+      const [saved]=mocks.save.mock.calls[0];
+      expect(saved).toMatchObject({imageUrl:'new-image',analysisProvider:'claude',storedAnalyses:{gemini:{summary:'gemini text'}}});
+    });
+    it('a failed analysis writes nothing',async()=>{
+      mocks.read.mockResolvedValue([gemini]);mocks.analyze.mockRejectedValue(Object.assign(new Error('401 invalid x-api-key'),{status:401}));
+      expect(await runReferenceAnalysis({id:'a',name:'A',imageUrl:'ignored',model:'claude-sonnet-5-5',reanalyze:true})).toMatchObject({status:'failed',kind:'permanent'});
+      expect(mocks.save).not.toHaveBeenCalled();
+    });
+  });
   it('refuses to reanalyze a cloud thumbnail before any model call',async()=>{
     const header=[0xff,0xd8,0xff,0xc0,0,17,8,0,179,0,179,3,0,0,0,0,0,0,0,0,0];
     mocks.read.mockResolvedValue([{...dna,imageUrl:`data:image/jpeg;base64,${btoa(String.fromCharCode(...header))}`}]);

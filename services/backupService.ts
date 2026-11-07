@@ -23,8 +23,7 @@ const scoresShape = {
 // Shared by export, validation, comparison and restore. usageMetadata is
 // consumption/provider data, not analytical DNA. Raw responses and arbitrary
 // extensions never enter this explicit contract.
-const RECORD_SCHEMA = {
-  id: 'string', name: 'string', imageUrl: 'string', ownerId: 'owner',
+const ANALYSIS_SCHEMA = {
   ...archivedTextSchema,
   stylePromptFragments: strings, contentMotifs: strings, identitySpecificDetails: strings,
   universalQualityAvoids: strings, styleSpecificAvoids: strings, contentSpecificAvoids: strings,
@@ -37,7 +36,15 @@ const RECORD_SCHEMA = {
   tags: strings, scores: { shape: scoresShape },
   scoreJustifications: { dictionary: 'string' },
   analysisVersion: 'number', analysisStatus: { values: ['complete', 'partial', 'legacy'] }, warnings: strings,
-  isCalibrated: 'boolean', calibrationVersion: 'number', createdAt: 'number', updatedAt: 'number', revision: 'number',
+  isCalibrated: 'boolean', calibrationVersion: 'number',
+  analysisProvider: { values: ['gemini', 'claude'] }, analysisModel: 'string',
+} satisfies Record<string, Rule>;
+
+const RECORD_SCHEMA = {
+  id: 'string', name: 'string', imageUrl: 'string', ownerId: 'owner',
+  ...ANALYSIS_SCHEMA,
+  storedAnalyses: { dictionary: { shape: ANALYSIS_SCHEMA } },
+  createdAt: 'number', updatedAt: 'number', revision: 'number',
   imageFingerprint: 'string', cloudDocumentId: 'string',
 } satisfies Record<Exclude<keyof VisualDNA, 'usageMetadata'>, Rule>;
 

@@ -6,7 +6,8 @@ import ArtstyleDatabase from './ArtstyleDatabase';
 import App from '../App';
 import {VisualDNA} from '../types';
 import {setDnaOwnerProvider} from '../services/dnaAccountContext';
-const m=vi.hoisted(()=>({read:vi.fn(),save:vi.fn(),log:vi.fn(),generate:vi.fn(),remove:vi.fn(),wipe:vi.fn(),exportBackup:vi.fn(),rows:[] as any[],auth:{currentUser:null as any},authChanged:null as any}));
+const m=vi.hoisted(()=>({claude:vi.fn(),read:vi.fn(),save:vi.fn(),log:vi.fn(),generate:vi.fn(),remove:vi.fn(),wipe:vi.fn(),exportBackup:vi.fn(),rows:[] as any[],auth:{currentUser:null as any},authChanged:null as any}));
+vi.mock('@anthropic-ai/sdk',()=>({default:class {beta={messages:{create:m.claude}};}}));
 vi.mock('../services/backupService',()=>({exportLibraryBackup:m.exportBackup,validateAndPreviewBackup:vi.fn(),applyBackupRestoration:vi.fn()}));
 vi.mock('@google/genai',()=>({Type:{OBJECT:'OBJECT',STRING:'STRING',ARRAY:'ARRAY',NUMBER:'NUMBER'},GoogleGenAI:class {models={generateContent:m.generate};}}));
 vi.mock('../services/geminiTransport', async () => {
@@ -23,7 +24,7 @@ vi.mock('../services/cloudDnaService',()=>({
 }));
 vi.mock('../services/imageUtils',()=>({compressImage:async(file:File)=>`data:image/png;base64,${encodeURIComponent(file.name)}`}));
 const analyzed={summary:'A monochrome knight',rendering:'cel shading',linework:'clean contours',scores:{style:0.8,rendering:0.9}};
-beforeEach(()=>{vi.clearAllMocks();m.auth.currentUser=null;setDnaOwnerProvider(()=>m.auth.currentUser?.uid??null);m.rows=[];m.read.mockImplementation(async()=>structuredClone(m.rows));m.log.mockResolvedValue(undefined);m.save.mockImplementation(async(d:VisualDNA)=>{m.rows=[d];return d;});m.generate.mockResolvedValue({text:JSON.stringify(analyzed),usageMetadata:{totalTokenCount:456}});});afterEach(cleanup);
+beforeEach(()=>{vi.clearAllMocks();localStorage.removeItem('grimoire_analysis_model');localStorage.removeItem('grimoire_claude_api_key');m.auth.currentUser=null;setDnaOwnerProvider(()=>m.auth.currentUser?.uid??null);m.rows=[];m.read.mockImplementation(async()=>structuredClone(m.rows));m.log.mockResolvedValue(undefined);m.save.mockImplementation(async(d:VisualDNA)=>{m.rows=[d];return d;});m.generate.mockResolvedValue({text:JSON.stringify(analyzed),usageMetadata:{totalTokenCount:456}});});afterEach(cleanup);
 it('real import handler runs analyzer, creation and single save preserving analyzer metadata',async()=>{
  const {container}=render(<ArtstyleDatabase/>);await screen.findByText(/database is empty/);
  fireEvent.change(container.querySelector('input[type=file]')!,{target:{files:[new File(['x'],'card.v1.png',{type:'image/png'})]}});
@@ -180,10 +181,85 @@ describe('Apagar biblioteca',()=>{
   await screen.findByText(/Apagadas 1 de 2/);expect(screen.getByText('Art A')).toBeTruthy();
  });
 });
+describe('Gemini and Claude on one record',()=>{
+ const claudeReply=(summary='A Claude reading')=>({model:'claude-sonnet-5-5',stop_reason:'end_turn',content:[{type:'text',text:JSON.stringify({...analyzed,summary,lighting:'Dramatic warm rim light from below'})}],usage:{input_tokens:540,cache_read_input_tokens:8600,cache_creation_input_tokens:0,output_tokens:2500}});
+ const geminiRecord=()=>({...analyzed,id:'art',name:'Art',imageUrl:'data:image/jpeg;base64,FULL',summary:'A Gemini reading',tags:['dragon'],revision:1,analysisVersion:4,analysisProvider:'gemini',analysisModel:'gemini-4-argon'});
+ const select=(model:string)=>fireEvent.change(screen.getByLabelText('Modelo de análise'),{target:{value:model}});
+ const saveKey=()=>{fireEvent.change(screen.getByLabelText('Chave da API do Claude'),{target:{value:'sk-test'}});fireEvent.click(screen.getByRole('button',{name:'Salvar'}));};
+ const reanalyze=()=>{const button=screen.getByTitle(/^Reanalisar com/);fireEvent.click(button);fireEvent.click(screen.getByTitle('Click again to confirm reanalysis'));};
+ beforeEach(()=>{m.save.mockImplementation(async(d:VisualDNA)=>{m.rows=[d];return d;});m.claude.mockResolvedValue(claudeReply());m.rows=[geminiRecord()];});
+ const open=async()=>{render(<ArtstyleDatabase/>);fireEvent.click(await screen.findByText('Art'));};
+
+ it('offers every analysis model and remembers the choice',async()=>{
+  const first=render(<ArtstyleDatabase/>);await screen.findByText('Art');
+  const options=Array.from((screen.getByLabelText('Modelo de análise') as HTMLSelectElement).options).map(o=>o.textContent);
+  expect(options).toEqual(['Gemini 4 Argon','Gemini 3.8 Flash','Claude Sonnet 5.5','Claude Opus 5.5']);
+  select('claude-opus-5-5');first.unmount();render(<ArtstyleDatabase/>);await screen.findByText('Art');
+  expect((screen.getByLabelText('Modelo de análise') as HTMLSelectElement).value).toBe('claude-opus-5-5');
+ });
+ it('asks for the key only with a Claude model, and refuses to run without it',async()=>{
+  await open();expect(screen.queryByLabelText('Chave da API do Claude')).toBeNull();
+  select('claude-sonnet-5-5');expect(screen.getByLabelText('Chave da API do Claude')).toBeTruthy();
+  fireEvent.click(screen.getByTitle(/^Reanalisar com/));
+  expect(await screen.findByText(/Informe a chave/)).toBeTruthy();expect(m.claude).not.toHaveBeenCalled();
+  saveKey();expect(localStorage.getItem('grimoire_claude_api_key')).toBe('sk-test');expect(screen.queryByLabelText('Chave da API do Claude')).toBeNull();
+  fireEvent.click(screen.getByRole('button',{name:'Remover chave do Claude'}));expect(localStorage.getItem('grimoire_claude_api_key')).toBeNull();
+ });
+ it('without a stored analysis there is no switch button',async()=>{
+  await open();expect(screen.queryByTitle(/Trocar para a análise/)).toBeNull();
+ });
+ it('analyzing with Claude keeps the Gemini analysis, and the button switches between them',async()=>{
+  await open();select('claude-sonnet-5-5');saveKey();reanalyze();
+  await waitFor(()=>expect(m.save).toHaveBeenCalledTimes(1));
+  const saved=m.save.mock.calls[0][0];
+  expect(saved).toMatchObject({summary:'A Claude reading',analysisProvider:'claude',analysisModel:'claude-sonnet-5-5'});
+  expect(saved.storedAnalyses.gemini).toMatchObject({summary:'A Gemini reading',analysisProvider:'gemini',analysisModel:'gemini-4-argon'});
+  const toGemini=await screen.findByTitle('Trocar para a análise de Gemini 4 Argon');
+  expect(screen.getAllByText('Claude Sonnet 5.5').length).toBeGreaterThan(0);expect(screen.getAllByText(/A Claude reading/).length).toBeGreaterThan(0);
+  fireEvent.click(toGemini);
+  const toClaude=await screen.findByTitle('Trocar para a análise de Claude Sonnet 5.5');
+  expect(m.save.mock.calls[1][0]).toMatchObject({summary:'A Gemini reading',analysisProvider:'gemini'});
+  expect(m.save.mock.calls[1][0].storedAnalyses.claude.summary).toBe('A Claude reading');
+  expect(screen.getAllByText(/A Gemini reading/).length).toBeGreaterThan(0);expect(m.claude).toHaveBeenCalledTimes(1);expect(m.generate).not.toHaveBeenCalled();
+  fireEvent.click(toClaude);await screen.findByTitle('Trocar para a análise de Gemini 4 Argon');
+  expect(m.save).toHaveBeenCalledTimes(3);expect(m.claude).toHaveBeenCalledTimes(1);
+ });
+ it('analyzing again with the same provider replaces only its own analysis',async()=>{
+  m.rows=[{...geminiRecord(),summary:'A Claude reading',analysisProvider:'claude',analysisModel:'claude-sonnet-5-5',storedAnalyses:{gemini:{summary:'A Gemini reading',analysisProvider:'gemini',analysisModel:'gemini-4-argon',analysisVersion:4}}}];
+  m.claude.mockResolvedValue({...claudeReply('A newer Claude reading'),model:'claude-opus-5-5'});
+  await open();select('claude-opus-5-5');saveKey();reanalyze();
+  await waitFor(()=>expect(m.save).toHaveBeenCalledTimes(1));
+  expect(m.save.mock.calls[0][0]).toMatchObject({summary:'A newer Claude reading',analysisModel:'claude-opus-5-5'});
+  expect(m.save.mock.calls[0][0].storedAnalyses.gemini.summary).toBe('A Gemini reading');
+  expect(m.generate).not.toHaveBeenCalled();
+ });
+ it('analyzing with the provider set aside replaces that one and makes it active',async()=>{
+  m.rows=[{...geminiRecord(),summary:'A Claude reading',analysisProvider:'claude',analysisModel:'claude-sonnet-5-5',storedAnalyses:{gemini:{summary:'A Gemini reading',analysisProvider:'gemini',analysisModel:'gemini-4-argon',analysisVersion:4}}}];
+  m.generate.mockResolvedValue({text:JSON.stringify({...analyzed,summary:'A newer Gemini reading'}),usageMetadata:{totalTokenCount:9}});
+  await open();reanalyze();
+  await waitFor(()=>expect(m.save).toHaveBeenCalledTimes(1));
+  const saved=m.save.mock.calls[0][0];
+  expect(saved).toMatchObject({summary:'A newer Gemini reading',analysisProvider:'gemini',analysisModel:'gemini-4-argon'});
+  expect(Object.keys(saved.storedAnalyses)).toEqual(['claude']);expect(saved.storedAnalyses.claude.summary).toBe('A Claude reading');
+ });
+ it('a folder import queues only the arts still missing the selected provider',async()=>{
+  const gone={...geminiRecord(),id:'both',name:'Both',storedAnalyses:{claude:{summary:'x',analysisVersion:4,analysisProvider:'claude'}}};
+  m.rows=[geminiRecord(),gone];
+  const {container}=render(<ArtstyleDatabase/>);await screen.findByText('Art');
+  select('claude-sonnet-5-5');
+  fireEvent.change(container.querySelector('input[type=file]')!,{target:{files:['Art.jpg','Both.jpg'].map(n=>new File(['x'],n,{type:'image/jpeg'}))}});
+  await screen.findByText(/0 novas e 1 atualizações. 1 já analisadas/);
+ });
+ it('a failed Claude call leaves the record untouched',async()=>{
+  m.claude.mockRejectedValue(Object.assign(new Error('401 invalid x-api-key'),{status:401}));
+  await open();select('claude-sonnet-5-5');saveKey();reanalyze();
+  await screen.findByText(/invalid x-api-key/);expect(m.save).not.toHaveBeenCalled();expect(screen.queryByTitle(/Trocar para a análise/)).toBeNull();
+ });
+});
 it('refuses to reanalyze a thumbnail from the detail panel',async()=>{
  m.rows=[{...analyzed,id:'thumb',name:'Thumb',imageUrl:thumbnail,tags:[]}];
  render(<ArtstyleDatabase/>);fireEvent.click(await screen.findByText('Thumb'));
- expect(screen.getByText('Miniatura')).toBeTruthy();fireEvent.click(screen.getByTitle('Re-run Gemini analysis'));
+ expect(screen.getByText('Miniatura')).toBeTruthy();fireEvent.click(screen.getByTitle(/^Reanalisar com/));
  expect(await screen.findByText(/Importe o original/)).toBeTruthy();expect(m.generate).not.toHaveBeenCalled();
 });
 it('real App tab switching keeps an in-flight analysis visible and prevents another model call',async()=>{
@@ -205,7 +281,7 @@ it.each(['edit','delete'])('direct reanalysis respects %s during the mocked mode
  const original={...analyzed,id:'direct',name:'Reference',imageUrl:'data:image/png;base64,mock',tags:[],revision:1};m.rows=[original];
  let resolve!:any;m.generate.mockReturnValueOnce(new Promise(r=>resolve=r));
  render(<ArtstyleDatabase/>);fireEvent.click(await screen.findByText('Reference'));
- fireEvent.click(screen.getByTitle('Re-run Gemini analysis'));
+ fireEvent.click(screen.getByTitle(/^Reanalisar com/));
  const confirm=screen.getByTitle('Click again to confirm reanalysis');
  fireEvent.click(confirm);fireEvent.click(confirm);
  await waitFor(()=>expect(m.generate).toHaveBeenCalledTimes(1));
