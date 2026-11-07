@@ -12,11 +12,15 @@
  *   the English negative determiner "no" using local context, vocabulary cues, and prepositional patterns.
  * - Preserves multi-item negative enumerations (e.g., "avoid dragons, armor and vampires") across commas
  *   until a strong sentence delimiter or clear affirmative transition cue is encountered.
+ * - Portuguese never uses "no" as a negation, so inside a clearly Portuguese clause it is read as the
+ *   preposition for any following word except a known English noun ("Dragão no vulcão" vs "Um dragão no armor").
  * - Remaining ambiguities that local heuristics cannot resolve include:
  *   1. Mixed-language telegraphic prompts where English "no" is followed by unmapped Portuguese words without punctuation.
  *   2. Nested exception clauses ("avoid dragons except small whelps").
  *   3. Double negatives or sarcastic inversions ("not without armor").
  */
+
+import { isEnglishGlossaryTerm, isPortugueseTerm } from "./portugueseTerms";
 
 export interface ParsedPromptIntent {
   /** The filtered prompt containing only affirmative subject details (used for style matching) */
@@ -87,6 +91,13 @@ const PT_PRECEDING_PATTERNS = /\b(?:um|uma|o|mago|nobre|cavaleiro|guerreiro|home
 export const isPortuguesePrepositionNo = (fullText: string, matchIndex: number): boolean => {
   const after = fullText.substring(matchIndex + 2).trim();
   const before = fullText.substring(0, matchIndex).trim();
+
+  // After a comma "no" opens a new thought ("Um mago, no dragons"), so only the older rules below apply.
+  const nextWord = after.split(/[\s,;.!?]+/)[0] ?? '';
+  const isPortugueseClause = /[áàãâéêíóôõúç]/i.test(fullText) || PT_PRECEDING_PATTERNS.test(before) || before.split(/\s+/).some(isPortugueseTerm);
+  if (!before.endsWith(',') && isPortugueseClause && nextWord && !isEnglishGlossaryTerm(nextWord)) {
+    return true;
+  }
 
   // If 'no' is not followed by a Portuguese location or setting noun, it cannot be the preposition "no"
   const nearbyWords = after.split(/\s+/).slice(0, 4);

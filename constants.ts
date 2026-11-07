@@ -51,6 +51,22 @@ Although these are for cards, treat them as SCENES (illustrations only, never ph
 3. Fill the canvas 100%.
 `;
 
+// One line of style per archetype, for the analysis prompt. The full presets would add
+// thousands of tokens to every analyzed image.
+export const ARCHETYPE_STYLE_SUMMARIES: Record<Exclude<Archetype, Archetype.Generic>, string> = {
+  [Archetype.Voidwalkers]: 'low-key near-black imagery, heavy shadow, eerie lean forms, tiny cold glowing accents',
+  [Archetype.LuminarchKnights]: 'high-key divine light, pale polished surfaces, thin elegant lines, smooth clean gradients',
+  [Archetype.Arcanists]: 'academic elegance, heavy drapery, precise geometric ornament, soft shading, minimal backgrounds',
+  [Archetype.ShadowHeart]: 'gothic dark comic-cover look, very high contrast, deep reds and magentas against black, apocalyptic skies',
+  [Archetype.ExtremeDragons]: 'imposing boss presentation, near-symmetrical iconic silhouette, majestic high-fantasy anime finish',
+  [Archetype.ZodiacTalismans]: 'flat calligraphic brush strokes, minimal emblem-like design, solid color, no micro-detail',
+  [Archetype.Miragebound]: 'warm sun-bleached light, glassy refraction, translucent layers, slender elegant forms, haze',
+  [Archetype.Bloomrot]: 'damp organic dark fantasy, mottled tactile surfaces, moody forest light, small bioluminescent accents',
+  [Archetype.BurningWest]: 'dusty low-sun contrast, ember glow, soot and rough inked comic texture, cinematic tension',
+  [Archetype.TechZero]: 'hard-surface angular forms, clean industrial light, restrained backgrounds, one strong accent color',
+  [Archetype.RoyalCarmine]: 'bright pristine aristocratic light, white and ivory dominance, refined fabrics, sparing crimson accents',
+};
+
 export const ARCHETYPE_DEFINITIONS: Record<Archetype, string> = {
   [Archetype.Generic]: `[[SHADOW DUEL GENERIC CORE STYLE]]:
 Core fantasy: archetype-neutral premium fantasy card illustration for Shadow Duel. The artwork must feel like a finished trading card illustration, not generic concept art, not a character sheet, and not a plain fantasy portrait.

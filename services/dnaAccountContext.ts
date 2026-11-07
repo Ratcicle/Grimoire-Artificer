@@ -28,7 +28,28 @@ export function subscribeDnaChanges(listener: () => void): () => void {
   return () => { listeners.delete(listener); };
 }
 
+let suspensions = 0;
+let notificationPending = false;
+
+/** Holds change events during a long batch and delivers one when released. */
+export function suspendDnaNotifications(): () => void {
+  suspensions++;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    if (--suspensions === 0 && notificationPending) {
+      notificationPending = false;
+      notifyDnaChanges();
+    }
+  };
+}
+
 export function notifyDnaChanges(): void {
+  if (suspensions > 0) {
+    notificationPending = true;
+    return;
+  }
   for (const listener of listeners) {
     try { listener(); } catch (error) { console.warn('Library change listener failed:', error); }
   }

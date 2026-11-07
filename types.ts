@@ -181,6 +181,8 @@ export interface VisualDNA {
   universalQualityAvoids?: string[];
   styleSpecificAvoids?: string[];
   contentSpecificAvoids?: string[];
+  /** Shadow Duel archetypes this art's style fits, judged apart from its subject. */
+  archetypeAffinity?: string[];
   analysisStatus?: "complete" | "partial" | "legacy";
   warnings?: string[];
   usageMetadata?: any;

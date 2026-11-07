@@ -1,4 +1,20 @@
-import { VisualDNA } from "../types";
+import { Archetype, VisualDNA } from "../types";
+
+/** Version 4 writes technique fields so they apply to a different subject. */
+export const CURRENT_ANALYSIS_VERSION = 4;
+
+export const hasTransferableAnalysis = (ref: Pick<Partial<VisualDNA>, 'analysisVersion'> | null | undefined): boolean =>
+  Number(ref?.analysisVersion) >= CURRENT_ANALYSIS_VERSION;
+
+export const TRANSFERABLE_TECHNIQUE_FIELDS: readonly string[] = [
+  'linework', 'rendering', 'lighting', 'pose', 'background', 'shapeLanguage', 'compositionRecipe',
+  'paletteLogic', 'materialBehavior', 'energyDesign', 'focalAnchors', 'detailPlacement', 'styleAnchors',
+];
+
+export const AFFINITY_ARCHETYPES: string[] = Object.values(Archetype).filter(archetype => archetype !== Archetype.Generic);
+
+export const normalizeArchetypeAffinity = (value: unknown): string[] =>
+  Array.isArray(value) ? [...new Set(value.filter(item => AFFINITY_ARCHETYPES.includes(item)))].slice(0, 3) : [];
 
 export const VISUAL_TAG_CATEGORIES: Record<string, string[]> = {
   "Core": [

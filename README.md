@@ -22,7 +22,7 @@ Os testes simulam Gemini, autenticação, Firestore, thumbnails e armazenamento.
 
 O Vite **não substitui** variáveis Gemini por valores dentro do JavaScript distribuído. Não configure `VITE_GEMINI_API_KEY` nem coloque credenciais em arquivos do frontend.
 
-Para uso local real posterior, o usuário pode configurar `GEMINI_API_KEY` no processo Node ou em `.env.local` (ignorado pelo Git). O endpoint local `/api/gemini/generate` usa essa variável somente no servidor. `/api/gemini/status` informa apenas se existe configuração; não valida a chave com uma chamada paga. Não há retries novos. O endpoint aceita apenas mesma origem e os modelos usados pelo projeto.
+Para uso local real posterior, o usuário pode configurar `GEMINI_API_KEY` no processo Node ou em `.env.local` (ignorado pelo Git). O endpoint local `/api/gemini/generate` usa essa variável somente no servidor. `/api/gemini/status` informa apenas se existe configuração; não valida a chave com uma chamada paga. O endpoint não faz retries, aceita até 4 operações simultâneas, apenas mesma origem e os modelos usados pelo projeto.
 
 A seleção por `window.aistudio.hasSelectedApiKey()` / `openSelectKey()` foi preservada. Ela precisa de um transporte efetivo: credencial fornecida pelo próprio runtime do host ou endpoint Gemini no servidor do host. A presença do seletor sozinha não é tratada como conexão funcional. **O mecanismo real do projeto dentro do AI Studio ainda precisa ser validado pelo proprietário.** Não reintroduza `define: process.env.API_KEY = chave` para fazê-lo funcionar.
 
@@ -32,7 +32,7 @@ O suporte atual a runtime Node no AI Studio e variáveis de segredo no servidor 
 
 ## Bibliotecas e sincronização
 
-- A biblioteca local conserva a imagem completa; Firestore recebe thumbnails de até **180×180**, JPEG qualidade **0,6**.
+- A biblioteca local conserva a imagem importada neste aparelho; Firestore recebe thumbnails de até **180×180**, JPEG qualidade **0,6**, e é isso que outro aparelho recebe ao sincronizar.
 - O histórico de imagens geradas continua em memória e desaparece ao recarregar.
 - Sync continua explícito, com cooldown de **20 segundos**, sem novos retries. A aplicação não inicia reanálise em lote ao importar ou sincronizar.
 - A biblioteca agora tem escopo por conta. Referências legadas sem proprietário permanecem no armazenamento original, disponíveis sem login; não são atribuídas automaticamente à próxima conta conectada. A interface explica esse escopo. Não houve migração de acervo real.
@@ -42,7 +42,17 @@ O suporte atual a runtime Node no AI Studio e variáveis de segredo no servidor 
 
 ## Importação e monitor
 
-PNG, JPEG e WebP: até 20 MiB por arquivo, 100 MiB por lote e 40 megapixels por imagem decodificada. A preparação local é sequencial. Nomes preservam pontos intermediários; duplicatas geram feedback.
+PNG, JPEG e WebP: até 20 MiB por arquivo, 2 GiB por lote e 40 megapixels por imagem decodificada. A preparação local é sequencial. Nomes preservam pontos intermediários; nomes repetidos no lote geram feedback.
+
+Um arquivo com o nome de um registro existente substitui a imagem e a análise dele, mantendo id, data de criação e tags personalizadas. Registros já na análise atual, com imagem completa, são pulados. Por isso, selecionar a pasta de novo retoma um lote interrompido sem pagar duas vezes.
+
+Na fila, **Piloto (5)** analisa só cinco itens para conferir custo e resultado, e **Analyze All** processa o restante, com até 4 análises simultâneas e botão **Pausar**. Só falhas não cobradas são repetidas sozinhas: limite de requisições (429) e indisponibilidade (5xx ou tempo esgotado). Cota diária ou saldo esgotado param o lote, e 5 falhas seguidas também. Uma resposta inválida, que pode ter sido cobrada, nunca é repetida automaticamente.
+
+Em um aparelho que recebeu a biblioteca pela nuvem, as imagens são miniaturas de até 180 px. A interface as identifica e recusa reanalisá-las até que o arquivo original seja importado. Sincronizar em outro aparelho um registro cuja imagem foi substituída também troca a cópia local desse aparelho pela miniatura.
+
+A análise v4 escreve os campos de técnica sem nomear o que está na arte, e por isso eles podem chegar ao prompt com vocabulário aberto. Conteúdo que apareça neles ainda precisa de apoio no pedido ou no arquétipo. Registros de versões anteriores continuam sob a lista de vocabulário.
+
+Pedidos em português funcionam com a biblioteca em inglês por um glossário local de termos de fantasia ([portugueseTerms.ts](services/portugueseTerms.ts)), sem chamada de IA. Uma palavra fora do glossário não é traduzida: acrescente-a lá se fizer falta.
 
 O monitor exibe `-` quando a API não forneceu uma contagem e `0` quando informou zero. Médias usam as tentativas com total conhecido, incluindo falhas. Totais seguem o provedor; cached tokens não são somados novamente ao input. [Contrato oficial de UsageMetadata](https://ai.google.dev/api/generate-content#UsageMetadata)
 

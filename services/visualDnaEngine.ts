@@ -1,6 +1,7 @@
 import { VisualDNA, SynthesisDebug, MatchDetail, DNAMatchingResult, MatchingScoreLog, CardType, Context, Complexity, Archetype } from "../types";
-import { VISUAL_TAG_KEYWORDS, isCalibratedRecord } from "./visualTags";
+import { VISUAL_TAG_KEYWORDS, hasTransferableAnalysis, isCalibratedRecord } from "./visualTags";
 import { parsePromptIntent, matchesPromptExclusion } from "./promptParser";
+import { englishTermsFor, withEnglishTerms } from "./portugueseTerms";
 import { ARCHETYPE_DEFINITIONS } from "../constants";
 import {
   SynthesisContext,
@@ -66,13 +67,13 @@ const prepareSearchQuery = (subject: string, cardType: string, archetype: string
       ? sectionContent(unwrapped.slice(separator.index + separator[0].length).replace(/^(?:\*\*|__)\s*/, ''))
       : '';
   }).join('\n');
-  const { affirmativeText, excludedWords } = parsePromptIntent(content);
+  const { affirmativeText, excludedWords, excludedPhrases } = parsePromptIntent(content);
   return {
     // Keep phrase order *within* clauses, without manufacturing a tag across
     // repeated sections. Only the per-field term set is deduplicated.
-    normalizedQuery: [affirmativeText, cardType, archetype]
+    normalizedQuery: [withEnglishTerms(affirmativeText), cardType, archetype]
       .flatMap(text => text.split(/[,;.!?\r\n]+/)).map(normalizeText).filter(Boolean).join(' | '),
-    excludedWords,
+    excludedWords: new Set([...excludedWords, ...englishTermsFor(excludedPhrases.join(' '))]),
   };
 };
 
@@ -81,7 +82,8 @@ export const scoreVisualDNAReferenceBase = (
   queryWordsNormalized: string,
   cardType: string,
   excludedWords?: Set<string>,
-  context?: Context | string
+  context?: Context | string,
+  archetype?: string
 ) => {
   let baseScore = 0;
   const matches: MatchDetail[] = [];
@@ -254,12 +256,16 @@ export const scoreVisualDNAReferenceBase = (
   checkField("primarySubject", dna.subjectProfile?.primarySubject, 1);
   checkField("subjectDescriptions", dna.subjects?.map(subject => subject.description), 1);
 
+  // Only technique reaches the prompt, so a reference whose style fits the selected
+  // archetype can compete even when it shares no theme with the request.
+  if (archetype && dna.archetypeAffinity?.includes(archetype)) addMatch("ArchetypeAffinity", archetype, 6);
+
   // Focus complements thematic relevance; it never selects a record by utility
   // or invents relevance for a reference with no query match.
   if (baseScore > 0 && context) {
     const categories = [dna.subjectProfile?.subjectCategory, ...(dna.subjects || []).filter(s => s.visualRole === 'primary').map(s => s.category)].filter(Boolean).map(normalizeText);
     const focusCategories: Record<string, string[]> = {
-      [Context.Character]: ['humanoid', 'human', 'character', 'creature', 'beast', 'dragon', 'monster'],
+      [Context.Character]: ['humanoid', 'human', 'character', 'creature', 'beast', 'dragon', 'monster', 'undead', 'machine'],
       [Context.Object]: ['object', 'artifact', 'weapon', 'equipment', 'item'],
       [Context.Scenario]: ['environment', 'scenario', 'landscape', 'architecture', 'location', 'setting']
     };
@@ -370,9 +376,20 @@ const scoreSearchReferences = (
 ) => {
   const { normalizedQuery, excludedWords } = prepareSearchQuery(subject, cardType, archetype);
   const scored = database.map(dna => ({
-    dna, result: scoreVisualDNAReferenceBase(dna, normalizedQuery, cardType, excludedWords, context)
+    dna, result: scoreVisualDNAReferenceBase(dna, normalizedQuery, cardType, excludedWords, context, archetype)
   }));
-  const selected = calculateComplementaryScores(scored.filter(s => s.result.baseScore > 0), maxReferences);
+  // Two records of one art would spend a slot twice. The newest analysis competes.
+  const competitors = new Map<string, typeof scored[number]>();
+  for (const candidate of scored) {
+    if (candidate.result.baseScore <= 0) continue;
+    const key = (candidate.dna.name || candidate.dna.id).toLocaleLowerCase();
+    const kept = competitors.get(key);
+    const version = (item: typeof candidate) => Number(item.dna.analysisVersion) || 0;
+    if (!kept || version(candidate) > version(kept) || (version(candidate) === version(kept) && candidate.result.baseScore > kept.result.baseScore)) {
+      competitors.set(key, candidate);
+    }
+  }
+  const selected = calculateComplementaryScores([...competitors.values()], maxReferences);
   return { scored, selected };
 };
 
@@ -493,7 +510,12 @@ export const synthesizeVisualDNA = (
     return { promptBlock: "", usedReferences: [], selectedReferences: [], debugInfo: null };
   }
 
-  const { affirmativeText, excludedWords, excludedPhrases } = parsePromptIntent(userPrompt || subject);
+  // References are analyzed in English: a request in Portuguese supports and excludes the same words.
+  const parsedIntent = parsePromptIntent(userPrompt || subject);
+  const excludedInEnglish = englishTermsFor(parsedIntent.excludedPhrases.join(' '));
+  const affirmativeText = withEnglishTerms(parsedIntent.affirmativeText);
+  const excludedWords = new Set([...parsedIntent.excludedWords, ...excludedInEnglish]);
+  const excludedPhrases = [...parsedIntent.excludedPhrases, ...excludedInEnglish];
   const resolvedPreset = params.archetypePreset || ARCHETYPE_DEFINITIONS[archetype as Archetype] || ARCHETYPE_DEFINITIONS[Archetype.Generic];
 
   const synthesisContext: SynthesisContext = {
@@ -576,9 +598,10 @@ export const synthesizeVisualDNA = (
   const getBestSlot = (
     primaryField: keyof VisualDNA,
     fallbackFields: (keyof VisualDNA)[],
-    scoreKey: keyof VisualDNA['scores']
+    scoreKey: keyof VisualDNA['scores'],
+    pool: VisualDNA[] = references
   ): string => {
-    const sorted = [...references].sort((a, b) => {
+    const sorted = [...pool].sort((a, b) => {
       const scoreA = getEffectiveUtilityScore(a, scoreKey);
       const scoreB = getEffectiveUtilityScore(b, scoreKey);
       if (scoreA !== scoreB) {
@@ -726,7 +749,9 @@ export const synthesizeVisualDNA = (
   const anchorInputs = references.flatMap(ref => {
     const fragments: string[] = [];
     if (Array.isArray(ref.stylePromptFragments)) fragments.push(...ref.stylePromptFragments);
-    if (typeof ref.styleAnchors === 'string') fragments.push(...ref.styleAnchors.split(/[,;]+/));
+    // v4 fragments already are the anchors; splitting the prose too would only add pieces.
+    const fragmentsSuffice = hasTransferableAnalysis(ref) && fragments.length > 0;
+    if (typeof ref.styleAnchors === 'string' && !fragmentsSuffice) fragments.push(...ref.styleAnchors.split(/[,;]+/));
     return fragments.map(text => ({ ref, text }));
   });
   const acceptedAnchors = selectContributions(anchorInputs, 'styleAnchors', 'style anchors', maxAnchors);
@@ -742,6 +767,9 @@ export const synthesizeVisualDNA = (
 
   // Semantic slot resolutions based on intensity
   const rendering = getBestSlot("rendering", ["linework"], "rendering");
+  // Line quality is a strong style marker. In v4 it stops being only a fallback for rendering.
+  const transferableRefs = references.filter(hasTransferableAnalysis);
+  const linework = transferableRefs.length > 0 ? getBestSlot("linework", [], "rendering", transferableRefs) : "";
   const lighting = getBestSlot("lighting", [], "lighting");
   const composition = getBestSlot("compositionRecipe", ["composition", "framing"], "composition");
 
@@ -987,6 +1015,7 @@ export const synthesizeVisualDNA = (
     if (rendering) {
       lines.push(`- Rendering: ${rendering}`);
     }
+    if (linework && linework !== rendering) lines.push(`- Linework: ${linework}`);
     if (lighting) lines.push(`- Lighting: ${lighting}`);
 
     if (intensity !== "low" && shapeLanguage) {
