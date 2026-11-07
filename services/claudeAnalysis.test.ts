@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { clearClaudeApiKey, getClaudeApiKey, requestClaudeAnalysis, setClaudeApiKey, toClaudeSchema } from './claudeAnalysis';
+import { clearClaudeApiKey, getClaudeApiKey, requestClaudeAnalysis, setClaudeApiKey, toJsonSchema } from './claudeAnalysis';
 import { analyzeReferenceImage, VISUAL_DNA_RESPONSE_SCHEMA } from './geminiService';
 import { classifyAnalysisFailure } from './analysisBatch';
 
@@ -36,38 +36,31 @@ beforeEach(() => {
   m.create.mockResolvedValue(reply());
 });
 
-describe('toClaudeSchema', () => {
-  const adapted = toClaudeSchema(VISUAL_DNA_RESPONSE_SCHEMA);
+describe('toJsonSchema', () => {
+  const adapted = toJsonSchema(VISUAL_DNA_RESPONSE_SCHEMA);
   const walk = (node: any, visit: (n: any) => void) => {
-    if (!node || typeof node !== 'object') return;
     visit(node);
     if (node.items) walk(node.items, visit);
     for (const child of Object.values(node.properties ?? {})) walk(child, visit);
   };
 
-  it('uses lowercase JSON types, keeps enums and drops unsupported constraints', () => {
+  it('uses lowercase JSON types at every level', () => {
     expect(adapted.type).toBe('object');
-    walk(adapted, node => {
-      expect(node.type).toBe(String(node.type).toLowerCase());
-      expect(node).not.toHaveProperty('maxItems');
-    });
-    expect(adapted.properties.archetypeAffinity.items.enum).toContain('Royal Carmine');
+    walk(adapted, node => expect(node.type).toBe(String(node.type).toLowerCase()));
+    expect(adapted.properties.subjects.items.properties.description.type).toBe('string');
   });
 
-  it('leaves no optional field and closes every object, as the API requires', () => {
-    let objects = 0;
-    walk(adapted, node => {
-      if (node.type !== 'object') return;
-      objects++;
-      expect(node.additionalProperties).toBe(false);
-      expect([...node.required].sort()).toEqual(Object.keys(node.properties).sort());
-    });
-    expect(objects).toBeGreaterThan(5);
+  it('keeps every instruction the schema carries', () => {
+    expect(adapted.properties.archetypeAffinity.items.enum).toContain('Royal Carmine');
+    expect(adapted.properties.archetypeAffinity.maxItems).toBe(3);
+    expect(adapted.properties.linework.description).toContain('Line quality');
+    expect(adapted.required).toEqual(VISUAL_DNA_RESPONSE_SCHEMA.required);
+    expect(Object.keys(adapted.properties)).toEqual(Object.keys(VISUAL_DNA_RESPONSE_SCHEMA.properties));
   });
 
   it('does not change the schema Gemini receives', () => {
     expect(VISUAL_DNA_RESPONSE_SCHEMA.type).not.toBe('object');
-    expect(VISUAL_DNA_RESPONSE_SCHEMA.properties).not.toHaveProperty('additionalProperties');
+    expect(VISUAL_DNA_RESPONSE_SCHEMA.properties.linework.type).not.toBe('string');
   });
 });
 
@@ -78,11 +71,13 @@ describe('requestClaudeAnalysis', () => {
     const body = m.create.mock.calls[0][0];
     expect(m.options[0]).toMatchObject({ apiKey: 'sk-test-key', dangerouslyAllowBrowser: true, maxRetries: 0 });
     expect(body.model).toBe('claude-sonnet-5-5');
-    expect(body.system).toEqual([{ type: 'text', text: 'THE PROMPT', cache_control: { type: 'ephemeral' } }]);
+    expect(body.system).toHaveLength(1);
+    expect(body.system[0].text).toMatch(/^THE PROMPT\n\n.*JSON Schema:\n\{"type":"object"/);
+    expect(body.system[0].cache_control).toEqual({ type: 'ephemeral' });
     expect(body.messages[0].content[0]).toEqual({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: 'IMG' } });
     expect(body.messages[0].content[1].type).toBe('text');
-    expect(body.output_config.format.type).toBe('json_schema');
-    expect(body.output_config.effort).toBe('medium');
+    // Structured outputs refuse this schema: "The compiled grammar is too large".
+    expect(body.output_config).toEqual({ effort: 'medium' });
     expect(body.thinking).toEqual({ type: 'adaptive' });
     expect(body.fallbacks).toBe('default');
     expect(body.betas).toEqual(['server-side-fallback-2026-07-01']);
@@ -95,6 +90,20 @@ describe('requestClaudeAnalysis', () => {
     expect(JSON.parse(text).summary).toBe('A dragon');
     expect(servedModel).toBe('claude-sonnet-5-5');
     expect(usageMetadata).toEqual({ promptTokenCount: 9140, candidatesTokenCount: 2300, thoughtsTokenCount: 300, cachedContentTokenCount: 8600, totalTokenCount: 11740, cacheCreationTokenCount: 0 });
+  });
+
+  it.each([
+    ['a code fence', '```json\n{"summary":"x"}\n```'],
+    ['text before and after', 'Here is the analysis:\n{"summary":"x"}\nDone.'],
+    ['spaces', '  {"summary":"x"}\n'],
+  ])('keeps only the JSON object when the answer has %s', async (_case, text) => {
+    m.create.mockResolvedValue(reply({ content: [{ type: 'text', text }] }));
+    expect((await requestClaudeAnalysis(request)).text).toBe('{"summary":"x"}');
+  });
+
+  it('an answer with no object comes back empty', async () => {
+    m.create.mockResolvedValue(reply({ content: [{ type: 'text', text: 'I cannot do that.' }] }));
+    expect((await requestClaudeAnalysis(request)).text).toBe('');
   });
 
   it('counts tokens written to the cache as input', async () => {
@@ -156,6 +165,7 @@ describe('analyzeReferenceImage with a Claude model', () => {
     expect(m.gemini).not.toHaveBeenCalled();
     expect(m.create.mock.calls[0][0].model).toBe('claude-opus-5-5');
     expect(m.create.mock.calls[0][0].system[0].text).toContain('TRANSFERABLE TECHNIQUE');
+    expect(m.create.mock.calls[0][0].system[0].text).toContain('"stylePromptFragments":{"type":"array"');
     expect(data).toMatchObject({ analysisVersion: 4, isCalibrated: true, calibrationVersion: 3 });
     expect(usageMetadata.totalTokenCount).toBe(11740);
     expect(servedModel).toBe('claude-sonnet-5-5');
@@ -165,6 +175,23 @@ describe('analyzeReferenceImage with a Claude model', () => {
   it('rejects invalid scores from Claude as it does from Gemini', async () => {
     m.create.mockResolvedValue(reply({ content: [{ type: 'text', text: JSON.stringify({ ...analysis, scores: { rendering: 85 } }) }] }));
     await expect(analyzeReferenceImage('data:image/jpeg;base64,IMG', 'Art', 'claude-sonnet-5-5')).rejects.toThrow(/score validation/);
+  });
+
+  it('accepts an answer with text around the object', async () => {
+    m.create.mockResolvedValue(reply({ content: [{ type: 'text', text: `Here it is:\n\`\`\`json\n${JSON.stringify(analysis)}\n\`\`\`` }] }));
+    const { data } = await analyzeReferenceImage('data:image/jpeg;base64,IMG', 'Art', 'claude-sonnet-5-5');
+    expect(data.summary).toBe('A dragon');
+  });
+
+  it.each([
+    ['broken JSON', '{"summary": "A dragon",}', /parse/],
+    ['no object at all', 'I cannot analyze this image.', /receive/],
+  ])('%s fails with the tokens it spent and saves nothing', async (_case, text, message) => {
+    m.create.mockResolvedValue(reply({ content: [{ type: 'text', text }] }));
+    const error: any = await analyzeReferenceImage('data:image/jpeg;base64,IMG', 'Art', 'claude-sonnet-5-5').catch(e => e);
+    expect(error.message).toMatch(message);
+    expect(error.usageMetadata.totalTokenCount).toBe(11740);
+    expect(classifyAnalysisFailure(error).kind).toBe('permanent');
   });
 
   it('a Gemini model never touches the Claude client', async () => {
@@ -185,7 +212,7 @@ describe('Claude API errors in the queue', () => {
     [{ status: 429, message: '429 You have reached your API usage limits' }, 'quota_exhausted', undefined],
     [{ status: 400, message: '400 You have reached your specified API usage limits' }, 'quota_exhausted', undefined],
     [{ status: 401, message: '401 invalid x-api-key' }, 'permanent', undefined],
-    [{ status: 400, message: '400 Schema is too complex for compilation.' }, 'permanent', undefined],
+    [{ status: 400, message: '400 Invalid request.' }, 'permanent', undefined],
   ])('%j', (error, kind, retryAfterMs) => {
     const failure = classifyAnalysisFailure(error);
     expect(failure.kind).toBe(kind);

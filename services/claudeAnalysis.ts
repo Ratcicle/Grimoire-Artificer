@@ -7,19 +7,15 @@ export const setClaudeApiKey = (key: string): void => localStorage.setItem(CLAUD
 export const clearClaudeApiKey = (): void => localStorage.removeItem(CLAUDE_KEY_STORAGE);
 
 /**
- * Adapts the shared analysis schema to Claude's structured outputs. Every field becomes required
- * because optional ones are capped per request, and `maxItems` is dropped because it is not
- * supported there. The normalizer applies the same list limits to every analysis afterwards.
+ * The shared analysis schema as plain JSON Schema, written into the prompt. Claude's structured
+ * outputs refuse it ("The compiled grammar is too large"), so the model follows it as an
+ * instruction and the validators and normalizer used for Gemini check the answer.
  */
-export function toClaudeSchema(schema: any): any {
-  if (!schema || typeof schema !== 'object') return schema;
-  const { type, properties, items, required: _required, maxItems: _maxItems, ...rest } = schema;
-  const adapted: any = { ...rest, type: String(type).toLowerCase() };
-  if (items) adapted.items = toClaudeSchema(items);
-  if (properties) {
-    adapted.properties = Object.fromEntries(Object.entries(properties).map(([key, value]) => [key, toClaudeSchema(value)]));
-    adapted.required = Object.keys(properties);
-    adapted.additionalProperties = false;
+export function toJsonSchema(schema: any): any {
+  const adapted = { ...schema, type: String(schema.type).toLowerCase() };
+  if (schema.items) adapted.items = toJsonSchema(schema.items);
+  if (schema.properties) {
+    adapted.properties = Object.fromEntries(Object.entries(schema.properties).map(([key, value]) => [key, toJsonSchema(value)]));
   }
   return adapted;
 }
@@ -70,12 +66,13 @@ export async function requestClaudeAnalysis(request: ClaudeAnalysisRequest) {
     betas: ['server-side-fallback-2026-07-01'],
     fallbacks: 'default',
     thinking: { type: 'adaptive' },
-    output_config: {
-      effort: 'medium',
-      format: { type: 'json_schema', schema: toClaudeSchema(request.schema) },
-    },
+    output_config: { effort: 'medium' },
     // The prompt and schema repeat on every art, so they are cached ahead of the image.
-    system: [{ type: 'text', text: request.prompt, cache_control: { type: 'ephemeral' } }],
+    system: [{
+      type: 'text',
+      text: `${request.prompt}\n\nThe JSON object must follow this JSON Schema:\n${JSON.stringify(toJsonSchema(request.schema))}`,
+      cache_control: { type: 'ephemeral' },
+    }],
     messages: [{
       role: 'user',
       content: [
@@ -99,5 +96,6 @@ export async function requestClaudeAnalysis(request: ClaudeAnalysisRequest) {
     throw Object.assign(new Error('A resposta do Claude foi cortada pelo limite de tokens.'), { usageMetadata });
   }
   const text = response.content.flatMap(block => block.type === 'text' ? [block.text] : []).join('');
-  return { text, usageMetadata, servedModel: response.model as string };
+  // Nothing forces the answer to be JSON alone, so whatever surrounds the object is dropped.
+  return { text: text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1), usageMetadata, servedModel: response.model as string };
 }
