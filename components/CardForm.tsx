@@ -218,7 +218,7 @@ const CardForm: React.FC<CardFormProps> = ({ onSubmit, isLoading, hasApiKey, onR
                     <Crown size={14} className={model === ImageModel.Pro ? "text-amber-500" : ""} />
                     <span className="text-[10px] font-bold uppercase">Pro (Pessoal)</span>
                 </div>
-                <span className="text-[9px] opacity-60">Gemini 3 Pro</span>
+                <span className="text-[9px] opacity-60">Nano Banana 2.1</span>
             </button>
 
             <button

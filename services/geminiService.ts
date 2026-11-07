@@ -449,7 +449,7 @@ export class GeminiOperationError extends Error {
 export const analyzeReferenceImage = async (
   base64Image: string,
   fileName: string,
-  modelName: string = "gemini-3.5-flash",
+  modelName: string = "gemini-4-argon",
   onRequest?: (attempted?: boolean) => void,
   lockedMode?: AccessMode
 ): Promise<{ data: Partial<VisualDNA>; patch?: VisualDNAPatch; usageMetadata?: any }> => {

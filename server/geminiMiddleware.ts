@@ -56,11 +56,14 @@ export function createGeminiMiddleware(options: ServerGeminiOptions) {
       const parsedBody = JSON.parse(body);
       const request = parsedBody as GenerateContentParameters & { accessMode?: string };
       const models = [
+        'gemini-nano-banana-2.1',
+        'nano-banana-2.1',
         'gemini-3-pro-image',
         'gemini-3.1-flash-image',
         'gemini-3.1-flash-lite-image',
         'gemini-3.5-flash',
-        'gemini-3.1-pro-preview'
+        'gemini-3.1-pro-preview',
+        'gemini-4-argon'
       ];
 
       if (!models.includes(request.model) || !request.contents || request.config?.httpOptions) {
@@ -70,9 +73,13 @@ export function createGeminiMiddleware(options: ServerGeminiOptions) {
       // Separação explícita de acesso: o modo padrão não pode consumir Pro/Flash silenciosamente
       const clientAccessMode = req.headers['x-grimoire-access-mode'] || request.accessMode;
       if (clientAccessMode === 'aistudio_default') {
-        if (request.model === 'gemini-3-pro-image' || request.model === 'gemini-3.1-flash-image') {
+        if (request.model === 'gemini-nano-banana-2.1' || request.model === 'nano-banana-2.1' || request.model === 'gemini-3-pro-image' || request.model === 'gemini-3.1-flash-image') {
           return respond(403, { error: 'O modelo Pro/Flash requer seleção explícita da chave pessoal no AI Studio.' });
         }
+      }
+
+      if (request.model === 'nano-banana-2.1') {
+        request.model = 'gemini-nano-banana-2.1';
       }
 
       apiAttempted = true;

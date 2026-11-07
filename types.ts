@@ -33,7 +33,7 @@ export enum Archetype {
 }
 
 export enum ImageModel {
-  Pro = 'gemini-3-pro-image',
+  Pro = 'gemini-nano-banana-2.1',
   Flash = 'gemini-3.1-flash-image',
   Lite = 'gemini-3.1-flash-lite-image',
 }

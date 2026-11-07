@@ -52,7 +52,7 @@ const ArtstyleDatabase: React.FC<ArtstyleDatabaseProps> = ({ onBackToGrimoire })
   const [selectedTag, setSelectedTag] = useState<string | null>(null);
   const [selectedDna, setSelectedDna] = useState<VisualDNA | null>(null);
   const [isEditing, setIsEditing] = useState<boolean>(false);
-  const [analysisModel, setAnalysisModel] = useState<string>("gemini-3.5-flash");
+  const [analysisModel, setAnalysisModel] = useState<string>("gemini-4-argon");
   
   // Tag Filter States
   const [collapsedCategories, setCollapsedCategories] = useState<Record<string, boolean>>({});
@@ -682,8 +682,7 @@ const ArtstyleDatabase: React.FC<ArtstyleDatabaseProps> = ({ onBackToGrimoire })
                   onChange={(e) => setAnalysisModel(e.target.value)}
                   className="bg-transparent text-[10px] font-bold text-amber-500 focus:outline-none cursor-pointer uppercase tracking-wider border-none p-0 pr-1 h-full text-right"
                 >
-                  <option value="gemini-3.1-pro-preview" className="bg-stone-950 text-stone-300">3.1 Pro</option>
-                  <option value="gemini-3.5-flash" className="bg-stone-950 text-stone-300">3.5 Flash</option>
+                  <option value="gemini-4-argon" className="bg-stone-950 text-stone-300">Gemini 4 Argon</option>
                 </select>
               </div>
               <button
