@@ -1,3 +1,5 @@
+import { fingerprintImage } from "./visualDnaSyncUtils";
+
 export function validateImageFile(file: File): void {
   if (!['image/png','image/jpeg','image/webp'].includes(file.type)) throw new Error(`${file.name}: use PNG, JPEG ou WebP.`);
   if (file.size > 20 * 1024 * 1024) throw new Error(`${file.name}: limite de 20 MiB por imagem.`);
@@ -13,6 +15,8 @@ export interface ExistingReferenceRules<T extends { id: string }> {
   byName: Map<string, T>;
   /** True when the record already has the current analysis of a full-size image. */
   isCurrent: (record: T) => boolean;
+  /** Name of the record holding each known image, by fingerprint. */
+  imageOwners?: Map<string, string>;
 }
 
 export interface PreparedReference {
@@ -34,6 +38,8 @@ export async function prepareReferenceFiles<T extends { id: string } = { id: str
   let skipped = 0;
   let batchBytes = 0;
   let processed = 0;
+  // A name guard cannot see one art saved under two names, and each copy would be a paid analysis.
+  const imageOwners = new Map(options.existing?.imageOwners ?? []);
   for (const file of files) {
     const name = file.name.replace(/\.[^.]+$/, '').trim();
     const key = name.toLocaleLowerCase();
@@ -50,6 +56,10 @@ export async function prepareReferenceFiles<T extends { id: string } = { id: str
         reserved.add(key);
         try {
           const base64 = await compress(file);
+          const fingerprint = fingerprintImage(base64);
+          const sameImage = imageOwners.get(fingerprint);
+          if (sameImage && sameImage.toLocaleLowerCase() !== key) throw new Error(`${file.name}: imagem idêntica a "${sameImage}".`);
+          imageOwners.set(fingerprint, name);
           items.push(record
             ? { id: record.id, name, base64, status: 'pending', operationType: 'upgrade' }
             : { id: crypto.randomUUID(), name, base64, status: 'pending' });

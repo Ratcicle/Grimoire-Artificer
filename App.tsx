@@ -519,7 +519,7 @@ const App: React.FC = () => {
             {(databaseVisited || currentTab === 'database') && (
               <div hidden={currentTab !== 'database'}>
               <React.Suspense fallback={<div className="p-8 text-stone-400">Loading database...</div>}>
-                <ArtstyleDatabase onBackToGrimoire={() => setCurrentTab('grimoire')} />
+                <ArtstyleDatabase />
               </React.Suspense>
               </div>
             )}

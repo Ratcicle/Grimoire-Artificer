@@ -1,12 +1,13 @@
 // @vitest-environment jsdom
 import React from 'react';
 import {act,cleanup,fireEvent,render,screen,waitFor} from '@testing-library/react';
-import {afterEach,beforeEach,expect,it,vi} from 'vitest';
+import {afterEach,beforeEach,describe,expect,it,vi} from 'vitest';
 import ArtstyleDatabase from './ArtstyleDatabase';
 import App from '../App';
 import {VisualDNA} from '../types';
 import {setDnaOwnerProvider} from '../services/dnaAccountContext';
-const m=vi.hoisted(()=>({read:vi.fn(),save:vi.fn(),log:vi.fn(),generate:vi.fn(),remove:vi.fn(),rows:[] as any[],auth:{currentUser:null as any},authChanged:null as any}));
+const m=vi.hoisted(()=>({read:vi.fn(),save:vi.fn(),log:vi.fn(),generate:vi.fn(),remove:vi.fn(),wipe:vi.fn(),exportBackup:vi.fn(),rows:[] as any[],auth:{currentUser:null as any},authChanged:null as any}));
+vi.mock('../services/backupService',()=>({exportLibraryBackup:m.exportBackup,validateAndPreviewBackup:vi.fn(),applyBackupRestoration:vi.fn()}));
 vi.mock('@google/genai',()=>({Type:{OBJECT:'OBJECT',STRING:'STRING',ARRAY:'ARRAY',NUMBER:'NUMBER'},GoogleGenAI:class {models={generateContent:m.generate};}}));
 vi.mock('../services/geminiTransport', async () => {
   const { GoogleGenAI } = await import('@google/genai');
@@ -17,14 +18,14 @@ vi.mock('../services/geminiTransport', async () => {
 vi.mock('../services/firebase',()=>({auth:m.auth,provider:{},signInWithPopup:vi.fn(),signOut:vi.fn(),onAuthStateChanged:(_a:any,cb:any)=>{m.authChanged=cb;cb(m.auth.currentUser);return ()=>{};}}));
 vi.mock('../services/localDbService',()=>({getLocalDNA:m.read,getLocalDNAById:async(id:string)=>(await m.read()).find((d:VisualDNA)=>d.id===id),saveTokenLog:m.log}));
 vi.mock('../services/cloudDnaService',()=>({
- saveDNA:m.save,deleteDNA:m.remove,syncCloudAndLocal:vi.fn(),syncLocalToCloud:vi.fn(),
+ saveDNA:m.save,deleteDNA:m.remove,wipeLibrary:m.wipe,syncCloudAndLocal:vi.fn(),syncLocalToCloud:vi.fn(),
  isFirestoreQuotaExceeded:()=>false,isCloudSyncEnabled:()=>false,setCloudSyncEnabled:vi.fn(),isSyncInProgress:()=>false,getLastSyncAt:()=>0,resetQuotaExceeded:vi.fn()
 }));
-vi.mock('../services/imageUtils',()=>({compressImage:async()=> 'data:image/png;base64,mock'}));
+vi.mock('../services/imageUtils',()=>({compressImage:async(file:File)=>`data:image/png;base64,${encodeURIComponent(file.name)}`}));
 const analyzed={summary:'A monochrome knight',rendering:'cel shading',linework:'clean contours',scores:{style:0.8,rendering:0.9}};
 beforeEach(()=>{vi.clearAllMocks();m.auth.currentUser=null;setDnaOwnerProvider(()=>m.auth.currentUser?.uid??null);m.rows=[];m.read.mockImplementation(async()=>structuredClone(m.rows));m.log.mockResolvedValue(undefined);m.save.mockImplementation(async(d:VisualDNA)=>{m.rows=[d];return d;});m.generate.mockResolvedValue({text:JSON.stringify(analyzed),usageMetadata:{totalTokenCount:456}});});afterEach(cleanup);
 it('real import handler runs analyzer, creation and single save preserving analyzer metadata',async()=>{
- const {container}=render(<ArtstyleDatabase onBackToGrimoire={()=>{}}/>);await screen.findByText(/database is empty/);
+ const {container}=render(<ArtstyleDatabase/>);await screen.findByText(/database is empty/);
  fireEvent.change(container.querySelector('input[type=file]')!,{target:{files:[new File(['x'],'card.v1.png',{type:'image/png'})]}});
  fireEvent.click(await screen.findByRole('button',{name:'Analyze'}));
  await waitFor(()=>expect(m.save).toHaveBeenCalledTimes(1));
@@ -34,7 +35,7 @@ it('real import handler runs analyzer, creation and single save preserving analy
  expect(saved).not.toHaveProperty('raw');expect(saved).not.toHaveProperty('patch');expect(saved).not.toHaveProperty('clearFields');
 });
 it('pending import stays visible when dismiss is clicked and does not call AI automatically',async()=>{
- const {container}=render(<ArtstyleDatabase onBackToGrimoire={()=>{}}/>);await screen.findByText(/database is empty/);
+ const {container}=render(<ArtstyleDatabase/>);await screen.findByText(/database is empty/);
  fireEvent.change(container.querySelector('input[type=file]')!,{target:{files:[new File(['x'],'one.png',{type:'image/png'})]}});
  await screen.findByRole('button',{name:'Analyze'});fireEvent.click(screen.getByRole('button',{name:'Dismiss finished'}));
  expect(screen.getByRole('button',{name:'Analyze'})).toBeTruthy();expect(m.generate).not.toHaveBeenCalled();
@@ -42,7 +43,7 @@ it('pending import stays visible when dismiss is clicked and does not call AI au
 
 it('account switch stops a prepared batch before the next model call',async()=>{
  m.auth.currentUser={uid:'A'};let resolve!:any;m.generate.mockReturnValueOnce(new Promise(r=>resolve=r));
- const {container}=render(<ArtstyleDatabase onBackToGrimoire={()=>{}}/>);await screen.findByText(/database is empty/);
+ const {container}=render(<ArtstyleDatabase/>);await screen.findByText(/database is empty/);
  fireEvent.change(container.querySelector('input[type=file]')!,{target:{files:[new File(['x'],'one.png',{type:'image/png'}),new File(['y'],'two.png',{type:'image/png'})]}});
  fireEvent.change(await screen.findByLabelText('Análises simultâneas'),{target:{value:'1'}});
  fireEvent.click(screen.getByRole('button',{name:'Analyze All'}));await waitFor(()=>expect(m.generate).toHaveBeenCalledTimes(1));
@@ -54,7 +55,7 @@ it.each(['save','delete'])('delayed %s completion cannot mutate the next account
  m.auth.currentUser={uid:'A'};m.rows=[record];let resolve!:any;
  if(operation==='save')m.save.mockReturnValueOnce(new Promise(r=>resolve=r));
  else m.remove.mockReturnValueOnce(new Promise(r=>resolve=r));
- render(<ArtstyleDatabase onBackToGrimoire={()=>{}}/>);await screen.findByText('Account A');
+ render(<ArtstyleDatabase/>);await screen.findByText('Account A');
  if(operation==='save'){
    fireEvent.click(screen.getByText('Account A'));fireEvent.click(screen.getByTitle('Edit memory details'));
    fireEvent.click(screen.getByRole('button',{name:'Save Edits'}));await waitFor(()=>expect(m.save).toHaveBeenCalledTimes(1));
@@ -65,26 +66,62 @@ it.each(['save','delete'])('delayed %s completion cannot mutate the next account
  await act(async()=>resolve(record));
  expect(screen.queryAllByText('Account A')).toHaveLength(0);expect(screen.getByText('Account B')).toBeTruthy();
 });
+describe('library screen',()=>{
+ const rows=[
+  {...analyzed,id:'1',name:'Zeta',imageUrl:'x',tags:['dragon'],updatedAt:100},
+  {...analyzed,id:'2',name:'alpha',imageUrl:'x',tags:[],updatedAt:300},
+  {...analyzed,id:'3',name:'Art 10',imageUrl:'x',tags:[],updatedAt:200},
+  {...analyzed,id:'4',name:'Art 2',imageUrl:'x',tags:[],createdAt:50},
+ ];
+ const names=()=>screen.getAllByRole('heading',{level:4}).map(h=>h.textContent).filter(n=>rows.some(r=>r.name===n));
+ beforeEach(()=>{localStorage.removeItem('grimoire_library_sort');m.rows=structuredClone(rows);});
+ it('sorts by last change by default and toggles to alphabetical, remembering the choice',async()=>{
+  const first=render(<ArtstyleDatabase/>);await screen.findByText('Zeta');
+  expect(names()).toEqual(['alpha','Art 10','Zeta','Art 2']);
+  fireEvent.click(screen.getByRole('button',{name:'Ordem: data de alteração'}));
+  expect(names()).toEqual(['alpha','Art 2','Art 10','Zeta']);
+  first.unmount();
+  render(<ArtstyleDatabase/>);await screen.findByText('Zeta');
+  expect(names()).toEqual(['alpha','Art 2','Art 10','Zeta']);
+  fireEvent.click(screen.getByRole('button',{name:'Ordem: alfabética'}));
+  expect(names()).toEqual(['alpha','Art 10','Zeta','Art 2']);
+ });
+ it('keeps the order while searching',async()=>{
+  render(<ArtstyleDatabase/>);await screen.findByText('Zeta');
+  fireEvent.change(screen.getByPlaceholderText('Search Visual Memories...'),{target:{value:'art'}});
+  expect(names()).toEqual(['Art 10','Art 2']);
+ });
+ it('starts with the tag blocks hidden and shows them on request',async()=>{
+  render(<ArtstyleDatabase/>);await screen.findByText('Zeta');
+  expect(screen.queryByText('Physical Scale')).toBeNull();
+  fireEvent.click(screen.getByRole('button',{name:'Mostrar Blocos'}));
+  expect(screen.getByText('Physical Scale')).toBeTruthy();
+ });
+ it('has no shortcut back to the generator and no usage hints',async()=>{
+  m.rows=[{...rows[0],imageUrl:thumbnail}];
+  const {container}=render(<ArtstyleDatabase/>);await screen.findByText('Zeta');
+  expect(screen.queryByRole('button',{name:/Forge Cards/})).toBeNull();
+  expect(container.textContent).not.toMatch(/só têm a miniatura|importe os arquivos/i);
+ });
+});
 const thumbnail=`data:image/jpeg;base64,${btoa(String.fromCharCode(0xff,0xd8,0xff,0xc0,0,17,8,0,179,0,179,3,0,0,0,0,0,0,0,0,0))}`;
 it('selecting a folder upgrades same-name records, skips finished ones and adds new ones',async()=>{
  const old={...analyzed,id:'old-id',name:'Old Art',imageUrl:thumbnail,energyDesign:'stale text',tags:['boss monster','my custom tag'],revision:2,createdAt:5,cloudDocumentId:'doc'};
  const done={...analyzed,id:'done-id',name:'Done Art',imageUrl:'data:image/jpeg;base64,full',tags:[],analysisVersion:4};
  m.rows=[old,done];m.save.mockImplementation(async(d:VisualDNA)=>{m.rows=[...m.rows.filter(r=>r.id!==d.id),d];return d;});
- const {container}=render(<ArtstyleDatabase onBackToGrimoire={()=>{}}/>);await screen.findByText('Old Art');
- expect(screen.getByText(/1 referências só têm a miniatura/)).toBeTruthy();
+ const {container}=render(<ArtstyleDatabase/>);await screen.findByText('Old Art');
  fireEvent.change(container.querySelector('input[type=file]')!,{target:{files:['Old Art.jpg','Done Art.jpg','New Art.jpg'].map(n=>new File(['x'],n,{type:'image/jpeg'}))}});
  await screen.findByText(/1 novas e 1 atualizações. 1 já analisadas/);
  fireEvent.click(await screen.findByRole('button',{name:'Analyze All'}));
  await waitFor(()=>expect(m.save).toHaveBeenCalledTimes(2));await screen.findByText(/Lote concluído: 2 analisadas, 0 com falha/);
  expect(m.generate).toHaveBeenCalledTimes(2);
  const upgraded=m.save.mock.calls.map(c=>c[0]).find(d=>d.name==='Old Art');
- expect(upgraded).toMatchObject({id:'old-id',imageUrl:'data:image/png;base64,mock',analysisVersion:4,cloudDocumentId:'doc'});
+ expect(upgraded).toMatchObject({id:'old-id',imageUrl:'data:image/png;base64,Old%20Art.jpg',analysisVersion:4,cloudDocumentId:'doc'});
  expect(upgraded.tags).toContain('my custom tag');expect(upgraded).not.toHaveProperty('energyDesign','stale text');
- await waitFor(()=>expect(screen.queryByText(/referências só têm a miniatura/)).toBeNull());
 });
 it('Piloto analyzes only the first items and Pausar stops the rest of a batch',async()=>{
  m.save.mockImplementation(async(d:VisualDNA)=>{m.rows=[...m.rows.filter(r=>r.id!==d.id),d];return d;});
- const {container}=render(<ArtstyleDatabase onBackToGrimoire={()=>{}}/>);await screen.findByText(/database is empty/);
+ const {container}=render(<ArtstyleDatabase/>);await screen.findByText(/database is empty/);
  fireEvent.change(container.querySelector('input[type=file]')!,{target:{files:Array.from({length:9},(_,i)=>new File(['x'],`art-${i}.jpg`,{type:'image/jpeg'}))}});
  fireEvent.click(await screen.findByRole('button',{name:'Piloto (5)'}));
  await screen.findByText(/Piloto concluído: 5 analisadas/);expect(m.generate).toHaveBeenCalledTimes(5);
@@ -99,17 +136,55 @@ it('Piloto analyzes only the first items and Pausar stops the rest of a batch',a
 });
 it('a broken setup stops the batch after a few failures instead of burning the queue',async()=>{
  m.generate.mockResolvedValue({text:'not json',usageMetadata:{totalTokenCount:1}});
- const {container}=render(<ArtstyleDatabase onBackToGrimoire={()=>{}}/>);await screen.findByText(/database is empty/);
+ const {container}=render(<ArtstyleDatabase/>);await screen.findByText(/database is empty/);
  fireEvent.change(container.querySelector('input[type=file]')!,{target:{files:Array.from({length:30},(_,i)=>new File(['x'],`art-${i}.jpg`,{type:'image/jpeg'}))}});
  fireEvent.change(await screen.findByLabelText('Análises simultâneas'),{target:{value:'1'}});
  fireEvent.click(screen.getByRole('button',{name:'Analyze All'}));
  await screen.findByText(/Parado depois de falhas seguidas/);expect(m.generate).toHaveBeenCalledTimes(5);expect(m.save).not.toHaveBeenCalled();
 });
+describe('Apagar biblioteca',()=>{
+ beforeEach(()=>{
+  URL.createObjectURL=vi.fn(()=>'blob:backup');URL.revokeObjectURL=vi.fn();
+  m.exportBackup.mockResolvedValue({records:[],warnings:[]});
+  m.wipe.mockImplementation(async()=>{m.rows=[];return {localDeleted:2,cloudDeleted:2};});
+ });
+ const open=async(user?:{uid:string})=>{
+  m.auth.currentUser=user??null;m.rows=[{...analyzed,id:'a',name:'Art A',imageUrl:'x',tags:[],ownerId:user?.uid??null},{...analyzed,id:'b',name:'Art B',imageUrl:'y',tags:[],ownerId:user?.uid??null}];
+  render(<ArtstyleDatabase/>);await screen.findByText('Art A');
+  fireEvent.click(screen.getByRole('button',{name:'Apagar biblioteca'}));
+ };
+ const confirm=()=>fireEvent.change(screen.getByLabelText('Digite APAGAR para confirmar'),{target:{value:'apagar'}});
+ const submit=()=>screen.getByRole('button',{name:'Baixar backup e apagar'}) as HTMLButtonElement;
+ it('needs the typed confirmation, downloads a backup first, then wipes everywhere',async()=>{
+  await open({uid:'A'});expect(submit().disabled).toBe(true);fireEvent.click(submit());expect(m.wipe).not.toHaveBeenCalled();
+  confirm();expect(submit().disabled).toBe(false);fireEvent.click(submit());
+  await screen.findByText(/Biblioteca apagada: 2 neste aparelho e 2 na nuvem/);
+  expect(m.exportBackup.mock.invocationCallOrder[0]).toBeLessThan(m.wipe.mock.invocationCallOrder[0]);
+  expect(m.wipe.mock.calls[0][0].includeCloud).toBe(true);
+  await screen.findByText(/database is empty/);expect(screen.queryByText('Art A')).toBeNull();
+ });
+ it('never deletes when the backup fails',async()=>{
+  m.exportBackup.mockRejectedValue(new Error('disk full'));await open({uid:'A'});confirm();fireEvent.click(submit());
+  await screen.findByText(/Falha ao exportar backup: disk full/);expect(m.wipe).not.toHaveBeenCalled();expect(screen.getByText('Art A')).toBeTruthy();
+ });
+ it('offers a device-only wipe to a connected account',async()=>{
+  await open({uid:'A'});fireEvent.click(screen.getByLabelText('Só neste aparelho'));confirm();fireEvent.click(submit());
+  await waitFor(()=>expect(m.wipe).toHaveBeenCalled());expect(m.wipe.mock.calls[0][0].includeCloud).toBe(false);
+ });
+ it('without an account it only touches this device',async()=>{
+  await open();expect(screen.queryByLabelText('Só neste aparelho')).toBeNull();confirm();fireEvent.click(submit());
+  await waitFor(()=>expect(m.wipe).toHaveBeenCalled());expect(m.wipe.mock.calls[0][0].includeCloud).toBe(false);
+ });
+ it('shows why a failed wipe stopped and keeps the library on screen',async()=>{
+  m.wipe.mockRejectedValue(new Error('Apagadas 1 de 2 referências da nuvem, e nada foi apagado neste aparelho.'));await open({uid:'A'});confirm();fireEvent.click(submit());
+  await screen.findByText(/Apagadas 1 de 2/);expect(screen.getByText('Art A')).toBeTruthy();
+ });
+});
 it('refuses to reanalyze a thumbnail from the detail panel',async()=>{
  m.rows=[{...analyzed,id:'thumb',name:'Thumb',imageUrl:thumbnail,tags:[]}];
- render(<ArtstyleDatabase onBackToGrimoire={()=>{}}/>);fireEvent.click(await screen.findByText('Thumb'));
+ render(<ArtstyleDatabase/>);fireEvent.click(await screen.findByText('Thumb'));
  expect(screen.getByText('Miniatura')).toBeTruthy();fireEvent.click(screen.getByTitle('Re-run Gemini analysis'));
- expect(await screen.findByText(/Importe o arquivo original/)).toBeTruthy();expect(m.generate).not.toHaveBeenCalled();
+ expect(await screen.findByText(/Importe o original/)).toBeTruthy();expect(m.generate).not.toHaveBeenCalled();
 });
 it('real App tab switching keeps an in-flight analysis visible and prevents another model call',async()=>{
  vi.stubGlobal('fetch',vi.fn().mockResolvedValue({ok:true,json:async()=>({configured:false})}));
@@ -129,7 +204,7 @@ it('real App tab switching keeps an in-flight analysis visible and prevents anot
 it.each(['edit','delete'])('direct reanalysis respects %s during the mocked model call and accounts usage once',async(change)=>{
  const original={...analyzed,id:'direct',name:'Reference',imageUrl:'data:image/png;base64,mock',tags:[],revision:1};m.rows=[original];
  let resolve!:any;m.generate.mockReturnValueOnce(new Promise(r=>resolve=r));
- render(<ArtstyleDatabase onBackToGrimoire={()=>{}}/>);fireEvent.click(await screen.findByText('Reference'));
+ render(<ArtstyleDatabase/>);fireEvent.click(await screen.findByText('Reference'));
  fireEvent.click(screen.getByTitle('Re-run Gemini analysis'));
  const confirm=screen.getByTitle('Click again to confirm reanalysis');
  fireEvent.click(confirm);fireEvent.click(confirm);

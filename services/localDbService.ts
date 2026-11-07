@@ -216,6 +216,38 @@ export const deleteLocalDNA = async (id: string, ownerId: string | null = captur
   notifyDnaChanges();
 };
 
+/**
+ * Empties this library on this device. No deletion intentions are kept: they would make a
+ * later sync delete cloud records, and a device-only reset must leave the cloud untouched.
+ */
+export const clearLocalLibrary = async (ownerId: string | null = captureDnaOperationContext().ownerId): Promise<number> => {
+  const db = await initDB();
+  assertDnaOperationContext({ ownerId });
+  const name = storeName(ownerId);
+  const transaction = db.transaction([name, TOMBSTONES_STORE], 'readwrite');
+  const completed = transactionCompletion(transaction);
+  const records = transaction.objectStore(name);
+  const tombstones = transaction.objectStore(TOMBSTONES_STORE);
+  let removed = 0;
+  const allRecords = records.getAll();
+  allRecords.onsuccess = () => {
+    for (const item of allRecords.result as any[]) {
+      if (ownerId === null ? item.ownerId != null : item.ownerId !== ownerId) continue;
+      records.delete(ownerId === null ? item.id : item.storageKey);
+      removed++;
+    }
+  };
+  const allTombstones = tombstones.getAll();
+  allTombstones.onsuccess = () => {
+    for (const item of allTombstones.result as DnaTombstone[]) {
+      if (item.ownerId === ownerId) tombstones.delete(item.storageKey);
+    }
+  };
+  await completed;
+  notifyDnaChanges();
+  return removed;
+};
+
 export const getDnaTombstones = async (ownerId: string | null = captureDnaOperationContext().ownerId): Promise<DnaTombstone[]> => {
   const db = await initDB();
   const stored = await readRequest(db.transaction(TOMBSTONES_STORE, 'readonly').objectStore(TOMBSTONES_STORE).getAll());

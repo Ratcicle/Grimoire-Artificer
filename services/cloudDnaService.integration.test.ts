@@ -12,7 +12,7 @@ vi.mock('firebase/firestore', () => ({
   doc: (_db: unknown, collection: string, id: string) => ({ collection, id }),
   query: (_collection: unknown, constraint: unknown) => constraint,
   where: (_field: string, _operator: string, owner: string) => ({ owner }),
-  getDocs: mocks.getDocs, setDoc: mocks.setDoc, deleteDoc: mocks.deleteDoc,
+  getDocs: mocks.getDocs, getDocsFromServer: mocks.getDocs, setDoc: mocks.setDoc, deleteDoc: mocks.deleteDoc,
 }));
 vi.mock('./imageUtils', () => ({ createThumbnail: mocks.createThumbnail }));
 
@@ -46,6 +46,92 @@ beforeEach(() => {
   mocks.createThumbnail.mockResolvedValue({ success: true, thumbnail: 'data:image/jpeg;base64,THUMB' });
 });
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+
+describe('wipeLibrary', () => {
+  const seed = async (service: typeof import('./cloudDnaService')) => {
+    await service.saveDNA(record({ id: 'one', name: 'One' }));
+    await service.saveDNA(record({ id: 'two', name: 'Two' }));
+  };
+
+  it('empties this account on the device and in the cloud, and nobody else', async () => {
+    const service = await import('./cloudDnaService');
+    const local = await import('./localDbService');
+    await seed(service);
+    await service.deleteDNA('two');
+    await service.saveDNA(record({ id: 'three', name: 'Three' }));
+    cloud.set('other-user-doc', { ...record({ id: 'other' }), userId: 'B' });
+    const progress = vi.fn();
+    const result = await service.wipeLibrary({ includeCloud: true, onProgress: progress });
+    expect(result).toEqual({ localDeleted: 2, cloudDeleted: 2 });
+    expect(await local.getLocalDNA()).toEqual([]);
+    expect(await local.getDnaTombstones()).toEqual([]);
+    expect([...cloud.keys()]).toEqual(['other-user-doc']);
+    expect(progress).toHaveBeenLastCalledWith(2, 2);
+  });
+
+  it('a library wiped everywhere stays empty after syncing', async () => {
+    const service = await import('./cloudDnaService');
+    const local = await import('./localDbService');
+    await seed(service);
+    await service.wipeLibrary({ includeCloud: true });
+    await service.syncCloudAndLocal();
+    expect(await local.getLocalDNA()).toEqual([]);
+    expect(cloud.size).toBe(0);
+  });
+
+  it('new references can be saved right after, including under the same name', async () => {
+    const service = await import('./cloudDnaService');
+    const local = await import('./localDbService');
+    await seed(service);
+    await service.wipeLibrary({ includeCloud: true });
+    await service.saveDNA(record({ id: 'fresh', name: 'One' }));
+    expect((await local.getLocalDNA()).map(item => item.id)).toEqual(['fresh']);
+    expect(cloud.size).toBe(1);
+  });
+
+  it('a device-only wipe leaves the cloud alone, so the next sync brings the library back', async () => {
+    const service = await import('./cloudDnaService');
+    const local = await import('./localDbService');
+    await seed(service);
+    mocks.deleteDoc.mockClear();
+    const result = await service.wipeLibrary({ includeCloud: false });
+    expect(result).toEqual({ localDeleted: 2, cloudDeleted: 0 });
+    expect(mocks.deleteDoc).not.toHaveBeenCalled();
+    expect(await local.getLocalDNA()).toEqual([]);
+    expect(cloud.size).toBe(2);
+    await service.syncCloudAndLocal();
+    expect((await local.getLocalDNA()).map(item => item.imageUrl)).toEqual(['data:image/jpeg;base64,THUMB', 'data:image/jpeg;base64,THUMB']);
+    expect(mocks.deleteDoc).not.toHaveBeenCalled();
+  });
+
+  it('a cloud failure keeps the device intact, and running it again finishes the job', async () => {
+    const service = await import('./cloudDnaService');
+    const local = await import('./localDbService');
+    await seed(service);
+    mocks.deleteDoc.mockImplementationOnce(async reference => { cloud.delete(reference.id); })
+      .mockRejectedValueOnce(new Error('network down'));
+    await expect(service.wipeLibrary({ includeCloud: true })).rejects.toThrow(/Apagadas 1 de 2.*nada foi apagado neste aparelho.*network down/);
+    expect(await local.getLocalDNA()).toHaveLength(2);
+    expect(cloud.size).toBe(1);
+    expect(await service.wipeLibrary({ includeCloud: true })).toEqual({ localDeleted: 2, cloudDeleted: 1 });
+    expect(await local.getLocalDNA()).toEqual([]);
+    expect(cloud.size).toBe(0);
+  });
+
+  it('refuses while a save is running, and without an account for the cloud', async () => {
+    const service = await import('./cloudDnaService');
+    const gate = deferred<void>();
+    mocks.setDoc.mockReturnValueOnce(gate.promise);
+    const saving = service.saveDNA(record());
+    await flushPromises();
+    await expect(service.wipeLibrary({ includeCloud: true })).rejects.toThrow(/Aguarde/);
+    gate.resolve();
+    await saving;
+    await flushPromises();
+    mocks.auth.currentUser = null;
+    await expect(service.wipeLibrary({ includeCloud: true })).rejects.toThrow(/Conecte a conta/);
+  });
+});
 
 describe('DATA storage orchestration through actual services', () => {
   it('DATA-02 does not upload again after full image becomes a cloud thumbnail', async () => {

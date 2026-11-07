@@ -9,7 +9,8 @@ import {
   setCloudSyncEnabled,
   isSyncInProgress,
   getLastSyncAt,
-  resetQuotaExceeded
+  resetQuotaExceeded,
+  wipeLibrary
 } from "../services/cloudDnaService";
 import { getLocalDNA } from "../services/localDbService";
 import { runReferenceAnalysis, isReferenceAnalyzing } from "../services/aiOperations";
@@ -24,16 +25,12 @@ import {
   applyBackupRestoration, 
   type BackupPreviewResult 
 } from "../services/backupService";
-import { 
-  Database, Upload, Trash2, Edit2, Search, RefreshCw, BarChart3, Tag, 
-  FileText, Check, AlertCircle, Sparkles, Sliders, ChevronDown, ChevronUp, 
+import {
+  Database, Upload, Trash2, Edit2, Search, RefreshCw, BarChart3, Tag,
+  FileText, Check, AlertCircle, Sparkles, Sliders, ChevronDown, ChevronUp,
   Image as ImageIcon, CheckCircle2, Eye, EyeOff, Save, X, Plus, Cloud, LogOut,
-  Download, AlertTriangle
+  Download, AlertTriangle, ArrowDownAZ, CalendarClock
 } from "lucide-react";
-
-interface ArtstyleDatabaseProps {
-  onBackToGrimoire: () => void;
-}
 
 import { 
   VISUAL_TAG_CATEGORIES, 
@@ -49,6 +46,9 @@ const LIBRARY_PAGE_SIZE = 60;
 const QUEUE_ROW_LIMIT = 40;
 const PILOT_SIZE = 5;
 const QUEUE_DISPLAY_ORDER = { analyzing: 0, failed: 1, pending: 2, done: 3 };
+const LIBRARY_SORT_KEY = 'grimoire_library_sort';
+const NAME_ORDER = new Intl.Collator(undefined, { sensitivity: 'base', numeric: true });
+const lastChanged = (item: VisualDNA) => item.updatedAt ?? item.createdAt ?? 0;
 
 const formatDuration = (ms: number): string => {
   const minutes = Math.max(1, Math.round(ms / 60000));
@@ -57,22 +57,19 @@ const formatDuration = (ms: number): string => {
 
 const describeBatchEnd = ({ reason, completed, failed, lastError }: BatchSummary, isPilot: boolean): string => {
   const tally = `${completed} analisadas, ${failed} com falha`;
-  if (reason === 'finished') {
-    return isPilot
-      ? `Piloto concluído: ${tally}. Confira o custo no Token Monitor e os novos registros antes de usar Analyze All.`
-      : `Lote concluído: ${tally}.${failed ? ' Analyze All tenta de novo apenas as que falharam.' : ''}`;
-  }
-  if (reason === 'stopped') return `Lote pausado: ${tally}. Analyze All continua de onde parou.`;
-  if (reason === 'quota_exhausted') return `Parado porque a cota diária ou o saldo acabou: ${tally}. Nada se perdeu; continue quando houver cota. ${lastError ?? ''}`;
-  if (reason === 'rate_limit') return `Parado porque o limite de requisições persistiu: ${tally}. Reduza as análises simultâneas e continue. ${lastError ?? ''}`;
-  return `Parado depois de falhas seguidas, para não gastar à toa: ${tally}. Último erro: ${lastError ?? 'desconhecido'}`;
+  if (reason === 'finished') return `${isPilot ? 'Piloto' : 'Lote'} concluído: ${tally}.`;
+  if (reason === 'stopped') return `Lote pausado: ${tally}.`;
+  if (reason === 'quota_exhausted') return `Cota ou saldo esgotado: ${tally}. ${lastError ?? ''}`;
+  if (reason === 'rate_limit') return `Limite de requisições persistente: ${tally}. ${lastError ?? ''}`;
+  return `Parado depois de falhas seguidas: ${tally}. Último erro: ${lastError ?? 'desconhecido'}`;
 };
 
-const ArtstyleDatabase: React.FC<ArtstyleDatabaseProps> = ({ onBackToGrimoire }) => {
+const ArtstyleDatabase: React.FC = () => {
   const [dnaList, setDnaList] = useState<VisualDNA[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [uploadQueue, setUploadQueue] = useState<{ id: string; name: string; base64: string; status: 'pending' | 'analyzing' | 'done' | 'failed'; error?: string; operationType?: 'import' | 'reanalyze' | 'upgrade'; context: DnaOperationContext }[]>([]);
   const [searchQuery, setSearchQuery] = useState<string>("");
+  const [librarySort, setLibrarySort] = useState<'date' | 'name'>(() => localStorage.getItem(LIBRARY_SORT_KEY) === 'name' ? 'name' : 'date');
   const [selectedTag, setSelectedTag] = useState<string | null>(null);
   const [selectedDna, setSelectedDna] = useState<VisualDNA | null>(null);
   const [isEditing, setIsEditing] = useState<boolean>(false);
@@ -81,7 +78,7 @@ const ArtstyleDatabase: React.FC<ArtstyleDatabaseProps> = ({ onBackToGrimoire })
   // Tag Filter States
   const [collapsedCategories, setCollapsedCategories] = useState<Record<string, boolean>>({});
   const [tagFilterSearch, setTagFilterSearch] = useState<string>("");
-  const [showTagBlocks, setShowTagBlocks] = useState<boolean>(true);
+  const [showTagBlocks, setShowTagBlocks] = useState<boolean>(false);
 
   const areAllCollapsed = Object.keys(VISUAL_TAG_CATEGORIES).every(cat => collapsedCategories[cat]);
   const handleToggleCollapseAll = () => {
@@ -129,6 +126,11 @@ const ArtstyleDatabase: React.FC<ArtstyleDatabaseProps> = ({ onBackToGrimoire })
   const [batchWaitUntil, setBatchWaitUntil] = useState(0);
   const [visibleCount, setVisibleCount] = useState(LIBRARY_PAGE_SIZE);
   const stopBatchRef = useRef(false);
+  const [wipeOpen, setWipeOpen] = useState(false);
+  const [wipeEverywhere, setWipeEverywhere] = useState(true);
+  const [wipeConfirmation, setWipeConfirmation] = useState("");
+  const [wiping, setWiping] = useState(false);
+  const [wipeProgress, setWipeProgress] = useState<{ done: number; total: number } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // References to keep the async loop immune to stale React state closures
@@ -253,7 +255,11 @@ const ArtstyleDatabase: React.FC<ArtstyleDatabaseProps> = ({ onBackToGrimoire })
       for (const record of [...existing].sort((a, b) => (a.updatedAt ?? 0) - (b.updatedAt ?? 0))) byName.set(record.name.toLocaleLowerCase(), record);
       const reserved = new Set<string>(uploadQueueRef.current.map(i => i.name.toLocaleLowerCase()));
       const result = await prepareReferenceFiles(files, reserved, file => compressImage(file, 800, 800, 0.8), {
-        existing: { byName, isCurrent: record => hasTransferableAnalysis(record) && !isThumbnailImage(record.imageUrl) },
+        existing: {
+          byName,
+          isCurrent: record => hasTransferableAnalysis(record) && !isThumbnailImage(record.imageUrl),
+          imageOwners: new Map(existing.filter(record => record.imageFingerprint).map(record => [record.imageFingerprint!, record.name])),
+        },
         onProgress: (done, total) => setPrepareProgress({ done, total }),
       });
       if (!isDnaOperationContextCurrent(context)) {setSyncStatusMsg('Conta alterada; importação descartada.');return;}
@@ -265,7 +271,7 @@ const ArtstyleDatabase: React.FC<ArtstyleDatabaseProps> = ({ onBackToGrimoire })
     finally {preparingFiles.current=false;setPreparing(false);setPrepareProgress(null);if(fileInputRef.current)fileInputRef.current.value='';}
   };
 
-  const handleExportBackup = async (targetScope: 'current' | 'legacy') => {
+  const handleExportBackup = async (targetScope: 'current' | 'legacy'): Promise<boolean> => {
     try {
       const scopeOwnerId = targetScope === 'legacy' ? null : (user ? user.uid : null);
       const backup = await exportLibraryBackup(scopeOwnerId);
@@ -281,8 +287,37 @@ const ArtstyleDatabase: React.FC<ArtstyleDatabaseProps> = ({ onBackToGrimoire })
       document.body.removeChild(downloadAnchor);
       URL.revokeObjectURL(url);
       setSyncStatusMsg(`Backup exportado: ${backup.records.length} referências salvas. ${backup.warnings.join(' ')}`);
+      return true;
     } catch (err: any) {
       setSyncStatusMsg(`Falha ao exportar backup: ${err.message}`);
+      return false;
+    }
+  };
+
+  const handleWipeLibrary = async () => {
+    if (wiping || wipeConfirmation.trim().toUpperCase() !== 'APAGAR') return;
+    setWiping(true);
+    try {
+      // Nothing is deleted without a copy of what is about to go.
+      if (!await handleExportBackup('current')) return;
+      const result = await wipeLibrary({
+        includeCloud: !!user && wipeEverywhere,
+        onProgress: (done, total) => setWipeProgress({ done, total }),
+      });
+      updateQueue(() => []);
+      setSelectedDna(null);
+      setIsEditing(false);
+      setBatchNote("");
+      setDuplicateWarning([]);
+      setWipeOpen(false);
+      setWipeConfirmation("");
+      await loadDatabase();
+      setSyncStatusMsg(`Biblioteca apagada: ${result.localDeleted} neste aparelho e ${result.cloudDeleted} na nuvem.`);
+    } catch (err) {
+      setSyncStatusMsg(err instanceof Error ? err.message : 'Falha ao apagar a biblioteca.');
+    } finally {
+      setWiping(false);
+      setWipeProgress(null);
     }
   };
 
@@ -477,7 +512,7 @@ const ArtstyleDatabase: React.FC<ArtstyleDatabaseProps> = ({ onBackToGrimoire })
     const context = { ownerId: user?.uid ?? null };
     if (!isDnaOperationContextCurrent(context) || isReferenceAnalyzing(dna.id)) return;
     if (isThumbnailImage(dna.imageUrl)) {
-      setSyncStatusMsg('Esta referência só tem a miniatura da nuvem. Importe o arquivo original com o mesmo nome para reanalisá-la.');
+      setSyncStatusMsg('Só há miniatura desta referência. Importe o original para reanalisar.');
       return;
     }
     if (reanalyzingConfirmId !== dna.id) {
@@ -553,7 +588,6 @@ const ArtstyleDatabase: React.FC<ArtstyleDatabaseProps> = ({ onBackToGrimoire })
     updateQueue(items => items.filter(i => i.status === 'analyzing' || i.status === 'pending'));
   };
 
-  const thumbnailCount = useMemo(() => dnaList.filter(item => isThumbnailImage(item.imageUrl)).length, [dnaList]);
   const tagCounts = useMemo(() => {
     const counts = new Map<string, number>();
     for (const item of dnaList) for (const tag of item.tags || []) counts.set(tag, (counts.get(tag) ?? 0) + 1);
@@ -569,16 +603,23 @@ const ArtstyleDatabase: React.FC<ArtstyleDatabaseProps> = ({ onBackToGrimoire })
     .sort((a, b) => QUEUE_DISPLAY_ORDER[a.status] - QUEUE_DISPLAY_ORDER[b.status])
     .slice(0, QUEUE_ROW_LIMIT);
 
+  const toggleLibrarySort = () => {
+    const next = librarySort === 'name' ? 'date' : 'name';
+    setLibrarySort(next);
+    localStorage.setItem(LIBRARY_SORT_KEY, next);
+  };
+
   // Filter List
-  const filteredList = dnaList.filter(item => {
-    const matchesSearch = 
-      item.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      (item.summary || '').toLowerCase().includes(searchQuery.toLowerCase());
-    
-    const matchesTag = selectedTag ? (item.tags || []).includes(selectedTag) : true;
-    
-    return matchesSearch && matchesTag;
-  });
+  const filteredList = useMemo(() => {
+    const query = searchQuery.toLowerCase();
+    return dnaList
+      .filter(item =>
+        (item.name.toLowerCase().includes(query) || (item.summary || '').toLowerCase().includes(query)) &&
+        (selectedTag ? (item.tags || []).includes(selectedTag) : true))
+      .sort((a, b) => librarySort === 'name'
+        ? NAME_ORDER.compare(a.name, b.name)
+        : lastChanged(b) - lastChanged(a) || NAME_ORDER.compare(a.name, b.name));
+  }, [dnaList, searchQuery, selectedTag, librarySort]);
 
   return (
     <div className="flex flex-col lg:flex-row gap-8 w-full min-h-full items-start">
@@ -627,12 +668,6 @@ const ArtstyleDatabase: React.FC<ArtstyleDatabaseProps> = ({ onBackToGrimoire })
                   {user ? 'Biblioteca desta conta. Referências antigas sem proprietário continuam disponíveis sem login.' : 'Biblioteca local sem conta. Conectar uma conta abre a biblioteca separada desse usuário.'}
                 </p>
               </div>
-              {thumbnailCount > 0 && (
-                <p className="text-[11px] text-amber-300/90 mt-2 flex items-start gap-1.5">
-                  <AlertTriangle size={12} className="shrink-0 mt-0.5" />
-                  <span>{thumbnailCount} referências só têm a miniatura da nuvem neste aparelho. Para reanalisá-las, importe os arquivos originais com o mesmo nome.</span>
-                </p>
-              )}
 
               <div className="flex flex-col gap-3 mt-4 pt-4 border-t border-stone-800/60">
                 <div className="flex flex-wrap items-center justify-between gap-4 bg-stone-950/40 p-4 rounded-xl border border-stone-800/40">
@@ -761,6 +796,55 @@ const ArtstyleDatabase: React.FC<ArtstyleDatabaseProps> = ({ onBackToGrimoire })
                   </div>
                 )}
 
+                {wipeOpen && (
+                  <div className="bg-red-950/15 border border-red-900/40 p-4 rounded-xl space-y-3 text-[11px] leading-relaxed text-stone-300">
+                    <p className="font-bold uppercase tracking-wider text-[10px] text-red-300">Apagar biblioteca</p>
+                    <p>
+                      Apaga as {dnaList.length} referências deste aparelho{user && wipeEverywhere ? ' e as desta conta na nuvem' : ''}. Um backup é baixado antes.
+                    </p>
+                    {user && (
+                      <div className="space-y-1.5">
+                        <label className="flex items-center gap-2 cursor-pointer">
+                          <input type="radio" name="wipe-scope" checked={wipeEverywhere} disabled={wiping} onChange={() => setWipeEverywhere(true)} />
+                          Neste aparelho e na nuvem
+                        </label>
+                        <label className="flex items-center gap-2 cursor-pointer">
+                          <input type="radio" name="wipe-scope" checked={!wipeEverywhere} disabled={wiping} onChange={() => setWipeEverywhere(false)} />
+                          Só neste aparelho
+                        </label>
+                      </div>
+                    )}
+                    <input
+                      type="text"
+                      aria-label="Digite APAGAR para confirmar"
+                      placeholder="Digite APAGAR para confirmar"
+                      value={wipeConfirmation}
+                      disabled={wiping}
+                      onChange={(e) => setWipeConfirmation(e.target.value)}
+                      className="w-full bg-stone-950/80 border border-stone-800 rounded px-2.5 py-1.5 text-[11px] text-stone-200 placeholder-stone-600 focus:outline-none focus:border-red-700"
+                    />
+                    {wipeProgress && <p role="status">Apagando da nuvem: {wipeProgress.done} de {wipeProgress.total}</p>}
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        onClick={handleWipeLibrary}
+                        disabled={wiping || wipeConfirmation.trim().toUpperCase() !== 'APAGAR'}
+                        className="px-3 py-1.5 bg-red-900/40 hover:bg-red-900/60 disabled:opacity-40 disabled:cursor-not-allowed text-red-100 border border-red-800/60 text-[10px] font-bold uppercase tracking-widest rounded transition-all"
+                      >
+                        {wiping ? 'Apagando...' : 'Baixar backup e apagar'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => { setWipeOpen(false); setWipeConfirmation(""); }}
+                        disabled={wiping}
+                        className="px-3 py-1.5 bg-stone-950/80 hover:bg-stone-900 text-stone-400 text-[10px] font-bold uppercase tracking-widest rounded transition-all"
+                      >
+                        Cancelar
+                      </button>
+                    </div>
+                  </div>
+                )}
+
                 {/* Toast status message banner */}
                 {syncStatusMsg && (
                   <div className="bg-stone-950/80 border border-stone-850 px-4 py-2.5 rounded-lg text-stone-300 text-[10px] font-bold uppercase tracking-widest flex items-center gap-2 animate-fade-in">
@@ -788,13 +872,6 @@ const ArtstyleDatabase: React.FC<ArtstyleDatabaseProps> = ({ onBackToGrimoire })
               >
                 <Upload size={13} className="shrink-0" />
                 Import References
-              </button>
-              <button
-                onClick={onBackToGrimoire}
-                className="w-full flex items-center justify-center gap-2 h-9 px-4 bg-stone-800 hover:bg-stone-700 text-stone-300 text-[10px] font-bold uppercase tracking-wider rounded-lg border border-stone-700 transition-all whitespace-nowrap cursor-pointer"
-              >
-                <Sparkles size={13} className="text-amber-500 shrink-0" />
-                Forge Cards
               </button>
               <div className="grid grid-cols-2 gap-1.5 pt-1 border-t border-stone-850/60">
                 <button
@@ -824,6 +901,16 @@ const ArtstyleDatabase: React.FC<ArtstyleDatabaseProps> = ({ onBackToGrimoire })
                   className="text-[8px] text-stone-500 hover:text-stone-300 uppercase tracking-widest text-center py-0.5 hover:underline cursor-pointer"
                 >
                   Exportar acervo legado
+                </button>
+              )}
+              {(user || dnaList.length > 0) && !wipeOpen && (
+                <button
+                  type="button"
+                  onClick={() => setWipeOpen(true)}
+                  disabled={!!batchRun || syncing || preparing}
+                  className="text-[8px] text-red-400/70 hover:text-red-300 disabled:opacity-40 disabled:cursor-not-allowed uppercase tracking-widest text-center py-0.5 hover:underline cursor-pointer"
+                >
+                  Apagar biblioteca
                 </button>
               )}
               <input
@@ -1009,7 +1096,6 @@ const ArtstyleDatabase: React.FC<ArtstyleDatabaseProps> = ({ onBackToGrimoire })
                     <button
                       onClick={() => startAllPending(PILOT_SIZE)}
                       className="px-3 py-1 bg-stone-950/80 hover:bg-stone-900 text-amber-300 border border-amber-900/30 text-[10px] font-bold uppercase tracking-widest rounded transition-all"
-                      title="Analisa só as próximas 5, para conferir custo e resultado"
                     >
                       Piloto ({PILOT_SIZE})
                     </button>
@@ -1039,9 +1125,8 @@ const ArtstyleDatabase: React.FC<ArtstyleDatabaseProps> = ({ onBackToGrimoire })
                       {batchEta !== null && ` · cerca de ${formatDuration(batchEta)} restantes`}
                     </p>
                     {batchWaitUntil > Date.now() && (
-                      <p className="text-amber-300">Aguardando o provedor até {new Date(batchWaitUntil).toLocaleTimeString()}. A fila retoma sozinha.</p>
+                      <p className="text-amber-300">Aguardando o provedor até {new Date(batchWaitUntil).toLocaleTimeString()}.</p>
                     )}
-                    <p className="text-stone-500">Mantenha esta aba aberta. Se ela fechar, importe a pasta de novo: as artes já analisadas são puladas.</p>
                   </>
                 )}
                 {batchNote && <p>{batchNote}</p>}
@@ -1091,18 +1176,30 @@ const ArtstyleDatabase: React.FC<ArtstyleDatabaseProps> = ({ onBackToGrimoire })
 
         {/* Reference List */}
         <div className="space-y-4">
-          <div className="flex justify-between items-center px-2">
-            <div className="relative flex-1 max-w-xs sm:max-w-md">
-              <Search className="absolute left-3 top-2.5 text-stone-600" size={14} />
-              <input
-                type="text"
-                placeholder="Search Visual Memories..."
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                className="w-full bg-stone-900/60 border border-stone-800 rounded-full pl-9 pr-4 py-2 text-xs text-stone-300 placeholder-stone-600 focus:outline-none focus:border-amber-600 transition-all"
-              />
+          <div className="flex justify-between items-center gap-3 px-2">
+            <div className="flex items-center gap-2 min-w-0">
+              <div className="relative w-52 min-w-0">
+                <Search className="absolute left-3 top-2.5 text-stone-600" size={14} />
+                <input
+                  type="text"
+                  placeholder="Search Visual Memories..."
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  className="w-full bg-stone-900/60 border border-stone-800 rounded-full pl-9 pr-4 py-2 text-xs text-stone-300 placeholder-stone-600 focus:outline-none focus:border-amber-600 transition-all"
+                />
+              </div>
+              <button
+                type="button"
+                onClick={toggleLibrarySort}
+                aria-label={librarySort === 'name' ? 'Ordem: alfabética' : 'Ordem: data de alteração'}
+                title={librarySort === 'name' ? 'Ordem alfabética' : 'Data de alteração'}
+                className="flex items-center gap-1.5 shrink-0 px-3 py-2 bg-stone-900/60 hover:bg-stone-900 border border-stone-800 rounded-full text-[10px] font-bold uppercase tracking-widest text-stone-400 hover:text-amber-400 transition-all cursor-pointer"
+              >
+                {librarySort === 'name' ? <ArrowDownAZ size={13} /> : <CalendarClock size={13} />}
+                {librarySort === 'name' ? 'A-Z' : 'Data'}
+              </button>
             </div>
-            <p className="text-[10px] text-stone-500 uppercase tracking-widest font-bold">
+            <p className="text-[10px] text-stone-500 uppercase tracking-widest font-bold shrink-0">
               Showing {filteredList.length} of {dnaList.length}
             </p>
           </div>
@@ -1272,7 +1369,7 @@ const ArtstyleDatabase: React.FC<ArtstyleDatabaseProps> = ({ onBackToGrimoire })
                       </span>
                     )}
                     {isThumbnailImage(selectedDna.imageUrl) && (
-                      <span className="px-1.5 py-0.5 bg-amber-950/80 text-amber-300 border border-amber-800/40 text-[8px] font-bold font-mono uppercase rounded tracking-wider" title="Cópia de até 180 px vinda da nuvem. Importe o original para reanalisar.">
+                      <span className="px-1.5 py-0.5 bg-amber-950/80 text-amber-300 border border-amber-800/40 text-[8px] font-bold font-mono uppercase rounded tracking-wider">
                         Miniatura
                       </span>
                     )}

@@ -84,7 +84,7 @@ export async function runReferenceAnalysis(request: ReferenceAnalysisRequest): P
     if (request.reanalyze && !existing) return {status:'deleted'};
     const snapshot: VisualDNA | null = existing ? structuredClone(existing) : null;
     if (snapshot && !request.replaceImage && isThumbnailImage(snapshot.imageUrl)) {
-      return {status:'failed',kind:'permanent',error:'Esta referência só tem a miniatura da nuvem. Importe o arquivo original com o mesmo nome para reanalisá-la.'};
+      return {status:'failed',kind:'permanent',error:'Só há miniatura desta referência. Importe o original para reanalisar.'};
     }
     let lockedMode: any;
     try {

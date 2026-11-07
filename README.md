@@ -48,6 +48,10 @@ Um arquivo com o nome de um registro existente substitui a imagem e a análise d
 
 Na fila, **Piloto (5)** analisa só cinco itens para conferir custo e resultado, e **Analyze All** processa o restante, com até 4 análises simultâneas e botão **Pausar**. Só falhas não cobradas são repetidas sozinhas: limite de requisições (429) e indisponibilidade (5xx ou tempo esgotado). Cota diária ou saldo esgotado param o lote, e 5 falhas seguidas também. Uma resposta inválida, que pode ter sido cobrada, nunca é repetida automaticamente.
 
+Imagens idênticas com nomes diferentes são recusadas na importação, tanto dentro do lote quanto em relação à biblioteca.
+
+**Apagar biblioteca** recomeça do zero. Baixa um backup, pede confirmação digitada e apaga neste aparelho e na nuvem, ou só neste aparelho. Se a nuvem falhar no meio, nada local é apagado, e repetir a ação termina o trabalho. Em outro aparelho conectado, use "Só neste aparelho" antes de sincronizar: sem isso, a sincronização de lá reenvia a biblioteca antiga para a nuvem.
+
 Em um aparelho que recebeu a biblioteca pela nuvem, as imagens são miniaturas de até 180 px. A interface as identifica e recusa reanalisá-las até que o arquivo original seja importado. Sincronizar em outro aparelho um registro cuja imagem foi substituída também troca a cópia local desse aparelho pela miniatura.
 
 A análise v4 escreve os campos de técnica sem nomear o que está na arte, e por isso eles podem chegar ao prompt com vocabulário aberto. Conteúdo que apareça neles ainda precisa de apoio no pedido ou no arquétipo. Registros de versões anteriores continuam sob a lista de vocabulário.

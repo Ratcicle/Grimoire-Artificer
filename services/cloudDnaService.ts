@@ -1,10 +1,10 @@
 import { VisualDNA } from '../types';
 import {
-  acknowledgeDnaDeletion, areLocalDnaSnapshotsEqual, deleteLocalDNA,
+  acknowledgeDnaDeletion, areLocalDnaSnapshotsEqual, clearLocalLibrary, deleteLocalDNA,
   getDnaTombstones, getLocalDNA, getLocalDNAById, saveLocalDNA, type DnaTombstone,
 } from './localDbService';
 import { db, auth } from './firebase';
-import { collection, doc, setDoc, getDocs, deleteDoc, query, where } from 'firebase/firestore';
+import { collection, doc, setDoc, getDocs, getDocsFromServer, deleteDoc, query, where } from 'firebase/firestore';
 import { createThumbnail } from './imageUtils';
 import {
   canonicalizeValue, createVisualDnaSyncPlan, fingerprintImage, getErrorMessage, isBase64Image,
@@ -317,3 +317,41 @@ async function reconcileDeletion(tombstone: DnaTombstone, context: DnaOperationC
 }
 
 export const syncLocalToCloud = (): Promise<SyncResult> => syncCloudAndLocal();
+
+export interface LibraryWipeResult {
+  localDeleted: number;
+  cloudDeleted: number;
+}
+
+/**
+ * Permanently empties the current library, to restart from a clean state. The cloud goes first:
+ * if it fails midway the local records stay, and running this again finishes the job. Local
+ * records removed first would come back from the cloud on the next sync.
+ */
+export const wipeLibrary = async (options: { includeCloud: boolean; onProgress?: (done: number, total: number) => void }): Promise<LibraryWipeResult> => {
+  const context = captureDnaOperationContext();
+  if (options.includeCloud && !context.ownerId) throw new Error('Conecte a conta para apagar a biblioteca da nuvem.');
+  if (syncInProgress || operationTails.size > 0) throw new Error('Aguarde as operações em andamento terminarem e tente de novo.');
+  syncInProgress = true;
+  try {
+    let cloudDeleted = 0;
+    if (options.includeCloud) {
+      // From the server: the local cache could hide records and leave them behind.
+      const { docs } = await getDocsFromServer(query(collection(db, 'visualDNA'), where('userId', '==', context.ownerId)));
+      assertDnaOperationContext(context);
+      options.onProgress?.(0, docs.length);
+      for (const document of docs) {
+        try { await deleteDoc(doc(db, 'visualDNA', document.id)); } catch (error) {
+          rememberQuota(error, context);
+          throw new Error(`Apagadas ${cloudDeleted} de ${docs.length} referências da nuvem, e nada foi apagado neste aparelho. Tente de novo. ${getErrorMessage(error)}`);
+        }
+        assertDnaOperationContext(context);
+        cloudDeleted++;
+        options.onProgress?.(cloudDeleted, docs.length);
+      }
+    }
+    return { localDeleted: await clearLocalLibrary(context.ownerId), cloudDeleted };
+  } finally {
+    syncInProgress = false;
+  }
+};
